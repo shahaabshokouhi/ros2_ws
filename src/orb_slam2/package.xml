@@ -2,16 +2,30 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>orb_slam2</name>
-  <version>0.0.0</version>
-  <description>TODO: Package description</description>
-  <maintainer email="jetsonorin1@todo.todo">jetsonorin1</maintainer>
-  <license>TODO: License declaration</license>
+  <version>0.0.1</version>
+  <description>ORB-SLAM2 ROS 2 wrapper node with direct RealSense integration</description>
+  <maintainer email="jetsonorin1@example.com">jetsonorin1</maintainer>
+  <license>BSD-3-Clause</license>
 
+  <!-- Build tools -->
   <buildtool_depend>ament_cmake</buildtool_depend>
 
+  <!-- Required dependencies -->
   <depend>rclcpp</depend>
+  <depend>geometry_msgs</depend>
   <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>nav_msgs</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>image_transport</depend>
+  <depend>cv_bridge</depend>
+   
+  <!-- Optional: RealSense wrapper if using ROS topics -->
+  <!-- <depend>realsense2_camera</depend> -->
 
+  <!-- Testing dependencies -->
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
 
