@@ -12,6 +12,8 @@
 #include <nav_msgs/msg/path.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
+
+#include <MapPoint.h>
 #include <System.h>
 
 
@@ -63,6 +65,8 @@ private:
         cv::Mat depth_normalized;
         cv::Mat bgr_image;
         cv::Mat Tcw;
+        std::vector<ORB_SLAM2::MapPoint*> vpHighObs;
+        std::vector<float> points;
 
         // Process color image
         try {
@@ -92,11 +96,15 @@ private:
 
         // Process images with ORB-SLAM2
         if (slam_) {
-                Tcw = slam_->TrackRGBD(
-                bgr_image,
-                depth_normalized,
-                timestamp
-            );
+
+            Tcw = slam_->TrackRGBD(
+            bgr_image,
+            depth_normalized,
+            timestamp);
+        
+            vpHighObs = slam_->GetHighQualityMapPoints();
+            std::cout << "High quality map points: " << vpHighObs.size() << std::endl;
+
         }
         
         if (Tcw.empty()) {
@@ -105,15 +113,11 @@ private:
             RCLCPP_INFO(this->get_logger(), "Tracking succeeded");
         }
 
-        path_msg_.header.stamp = color_msg->header.stamp;
-
         // Create PointCloud2 message
         sensor_msgs::msg::PointCloud2 cloud_msg;
         cloud_msg.header.stamp = color_msg->header.stamp;
         cloud_msg.header.frame_id = "camera_color_optical_frame";
         cloud_msg.height = 1;
-
-        std::vector<float> points;
 
         if (!Tcw.empty()) {
             cv::Mat tcw = Tcw.rowRange(0, 3).col(3);
@@ -121,53 +125,11 @@ private:
             
             cv::Mat Rwc = Rcw.t();
             cv::Mat twc = -Rwc * tcw;
-
-            for (int v = 0; v < depth_normalized.rows; ++v) {
-                for (int u = 0; u < depth_normalized.cols; ++u)
-                {
-                    float depth = depth_normalized.at<float>(v, u);
-                    if (depth > 4 || depth < 0.2) continue;
-                    float z = depth;
-                    float x = (u - cx_) * z / fx_;
-                    float y = (v - cy_) * z / fy_;
-
-                    points.push_back(z);
-                    points.push_back(-x);
-                    points.push_back(-y);
-                }
-                
-            }
-
-            cloud_msg.width = points.size() / 3;
-            cloud_msg.is_dense = false;
-
-            sensor_msgs::PointCloud2Modifier modifier(cloud_msg);
-            modifier.setPointCloud2FieldsByString(1, "xyz");
-            modifier.resize(cloud_msg.width);
-
-            sensor_msgs::PointCloud2Iterator<float> iter_x(cloud_msg, "x");
-            sensor_msgs::PointCloud2Iterator<float> iter_y(cloud_msg, "y");
-            sensor_msgs::PointCloud2Iterator<float> iter_z(cloud_msg, "z");
-
-            for (size_t i = 0; i < points.size(); i += 3) {
-                *iter_x = points[i];
-                *iter_y = points[i + 1];
-                *iter_z = points[i + 2];
-                ++iter_x; ++iter_y; ++iter_z;
-            }
-
-            pointcloud_pub_->publish(cloud_msg);
-        }
-
-
-        // Publish the pose
-        if (!Tcw.empty()) {
-            cv::Mat Rcw = Tcw.rowRange(0, 3).colRange(0, 3);
-            cv::Mat tcw = Tcw.rowRange(0, 3).col(3);
-
-            cv::Mat Rwc = Rcw.t();
-            cv::Mat twc = -Rwc * tcw;
-
+            cv::Mat Twc = cv::Mat::eye(4, 4, CV_32F);
+            Rwc.copyTo(Twc.rowRange(0, 3).colRange(0, 3));
+            twc.copyTo(Twc.rowRange(0, 3).col(3));
+            
+            // pose and path message
             tf2::Matrix3x3 tf_rot(
                 Rwc.at<float>(0, 0), Rwc.at<float>(0, 1), Rwc.at<float>(0, 2),
                 Rwc.at<float>(1, 0), Rwc.at<float>(1, 1), Rwc.at<float>(1, 2),
@@ -178,6 +140,7 @@ private:
 
             geometry_msgs::msg::PoseStamped pose_msg;
             pose_msg.header.stamp = color_msg->header.stamp;
+            path_msg_.header.stamp = color_msg->header.stamp;
             pose_msg.header.frame_id = "camera_frame";
             pose_msg.pose.position.x = twc.at<float>(2);
             pose_msg.pose.position.y = -twc.at<float>(0);
@@ -188,9 +151,63 @@ private:
             pose_msg.pose.orientation.w = tf_quat.w();
 
             path_msg_.poses.push_back(pose_msg);
-
             pose_pub_->publish(pose_msg);
 
+            // point cloud message
+            if (publish_cloud){
+
+                for (ORB_SLAM2::MapPoint* pMP : vpHighObs){
+                    if (!pMP || pMP->isBad()) continue;
+                    cv::Mat pos = pMP->GetWorldPos();
+
+                    points.push_back(pos.at<float>(2));
+                    points.push_back(-pos.at<float>(0));
+                    points.push_back(-pos.at<float>(1));
+                }
+                // for (int v = 0; v < depth_normalized.rows; ++v) {
+                //     for (int u = 0; u < depth_normalized.cols; ++u)
+                //     {
+                //         float depth = depth_normalized.at<float>(v, u);
+                //         if (depth > 3 || depth < 0.2) continue;
+                //         float z = depth;
+                //         float x = (u - cx_) * z / fx_;
+                //         float y = (v - cy_) * z / fy_;
+                        
+                //         // homogeneous coordinates
+                //         cv::Mat pt_cam = (cv::Mat_<float>(4, 1) << x, y, z, 1.0);
+
+                //         // transformation
+                //         cv::Mat pt_world = Twc * pt_cam;
+                        
+                //         points.push_back(pt_world.at<float>(2));
+                //         points.push_back(-pt_world.at<float>(0));
+                //         points.push_back(-pt_world.at<float>(1));
+
+                //     }
+                    
+                // }
+
+                cloud_msg.width = points.size() / 3;
+                cloud_msg.is_dense = false;
+
+                sensor_msgs::PointCloud2Modifier modifier(cloud_msg);
+                modifier.setPointCloud2FieldsByString(1, "xyz");
+                modifier.resize(cloud_msg.width);
+
+                sensor_msgs::PointCloud2Iterator<float> iter_x(cloud_msg, "x");
+                sensor_msgs::PointCloud2Iterator<float> iter_y(cloud_msg, "y");
+                sensor_msgs::PointCloud2Iterator<float> iter_z(cloud_msg, "z");
+
+                for (size_t i = 0; i < points.size(); i += 3) {
+                    *iter_x = points[i];
+                    *iter_y = points[i + 1];
+                    *iter_z = points[i + 2];
+                    ++iter_x; ++iter_y; ++iter_z;
+                }
+
+                pointcloud_pub_->publish(cloud_msg);
+            }
+            
         }
 
         // Publish the path
@@ -253,6 +270,7 @@ private:
     float fy_ = 0.0f;
     float cx_ = 0.0f;
     float cy_ = 0.0f;
+    bool publish_cloud = true;
 };
 
 int main(int argc, char** argv) {
