@@ -2,10 +2,10 @@ cmake_minimum_required(VERSION 3.8)
 project(orb_slam2)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  add_compile_options(-Wall -Wextra -Wpedantic)
+  add_compile_options(-Wall -Wextra -Wpedantic -Wno-deprecated-declarations)
 endif()
 
-# ROS 2 and system dependencies
+# ========== ROS 2 Dependencies ==========
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -22,55 +22,56 @@ find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(message_filters REQUIRED)
 
-# Include ORB-SLAM2 headers
+# ========== ORB_SLAM2 Local Build Paths ==========
+set(ORB_SLAM2_ROOT /home/shahab/Documents/Codes/ORB_SLAM2)
+
 include_directories(
   include
   ${OpenCV_INCLUDE_DIRS}
   ${Pangolin_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIR}
-  /home/jetson1/ORB_SLAM2/include
-  /home/jetson1/ORB_SLAM2/Thirdparty/DBoW2
-  /home/jetson1/ORB_SLAM2/Thirdparty/DBoW2/DBoW2     # ← add this
-  /home/jetson1/ORB_SLAM2/Thirdparty/g2o
-  /home/jetson1/ORB_SLAM2/Thirdparty/g2o/g2o
-  /home/jetson1/ORB_SLAM2                                 # ← NEW: Root path 
+  ${ORB_SLAM2_ROOT}
+  ${ORB_SLAM2_ROOT}/include
+  ${ORB_SLAM2_ROOT}/Thirdparty/DBoW2
+  ${ORB_SLAM2_ROOT}/Thirdparty/DBoW2/DBoW2
+  ${ORB_SLAM2_ROOT}/Thirdparty/g2o
+  ${ORB_SLAM2_ROOT}/Thirdparty/g2o/g2o
 )
 
-# Add your ORB-SLAM2 library
-link_directories(/home/jetson1/ORB_SLAM2/lib)
+link_directories(
+  ${ORB_SLAM2_ROOT}/lib
+  ${ORB_SLAM2_ROOT}/Thirdparty/DBoW2/lib
+  ${ORB_SLAM2_ROOT}/Thirdparty/g2o/lib
+)
 
-# Define the executable node
+# ========== ROS 2 Node ==========
 add_executable(orb_slam_node src/orb_slam_node.cpp)
-
-# Declare its ROS 2 dependencies
 
 ament_target_dependencies(
   orb_slam_node
   rclcpp
-  nav_msgs
-  geometry_msgs
+  std_msgs
   sensor_msgs
+  geometry_msgs
+  nav_msgs
+  tf2
+  tf2_ros
   cv_bridge
   image_transport
   message_filters
-  tf2
-  tf2_ros
 )
 
-# Link libraries
 target_link_libraries(orb_slam_node
   ORB_SLAM2
+  DBoW2
   ${OpenCV_LIBRARIES}
   ${Pangolin_LIBRARIES}
 )
-
-install(
-  DIRECTORY /home/jetson1/ORB_SLAM2/lib/
-  DESTINATION lib
-  FILES_MATCHING PATTERN "*.so*"
+set_target_properties(orb_slam_node PROPERTIES
+  BUILD_WITH_INSTALL_RPATH TRUE
+  INSTALL_RPATH "${ORB_SLAM2_ROOT}/lib"
 )
-
-# Install node
+# ========== Install Targets ==========
 install(TARGETS orb_slam_node
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
@@ -78,15 +79,12 @@ install(TARGETS orb_slam_node
 install(
   DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
- )
+)
 
-# Optional: enable tests
+# ========== Packaging ==========
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
-  set(ament_cmake_cpplint_FOUND TRUE)
-  set(ament_cmake_copyright_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
-add_compile_options(-Wno-deprecated-declarations)
 
 ament_package()

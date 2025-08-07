@@ -4,7 +4,7 @@
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <cv_bridge/cv_bridge.h>
-#include <image_transport/image_transport.h>
+#include <image_transport/image_transport.hpp>
 #include <opencv2/opencv.hpp>
 #include <message_filters/subscriber.h>
 #include <message_filters/time_synchronizer.h>
@@ -17,21 +17,23 @@
 #include <System.h>
 
 
-class ImageViewerNode : public rclcpp::Node {
+class ORBSLAM2Node : public rclcpp::Node {
 public:
-    ImageViewerNode()
-        : Node("orb_slam_node") 
+    ORBSLAM2Node(const rclcpp::NodeOptions &options)
+        : Node("orb_slam2_node", options) 
         {
-            RCLCPP_INFO(this->get_logger(), "Starting Image Viewer Node...");
-            
+            RCLCPP_INFO(this->get_logger(), "Node initialized as  '%s'", this->get_name());
+
+            std::string vocab_file = this->declare_parameter<std::string>("vocab_file");
+            std::string settings_file = this->declare_parameter<std::string>("settings_file");
 
             slam_ = std::make_unique<ORB_SLAM2::System>(
-                "/home/jetson1/ORB_SLAM2/Vocabulary/ORBvoc.txt",
-                "/home/jetson1/ORB_SLAM2/Examples/RGB-D/realsense.yaml",
+                vocab_file,
+                settings_file,
                 ORB_SLAM2::System::RGBD, false);
 
             cv::FileStorage fsettings(
-                "/home/jetson1/ORB_SLAM2/Examples/RGB-D/realsense.yaml", 
+                settings_file,
                 cv::FileStorage::READ
             );
 
@@ -52,7 +54,7 @@ public:
             depth_sub_.subscribe(this, "/camera/realsense2_camera/depth/image_rect_raw");
                         
             sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(10), color_sub_, depth_sub_);
-            sync_->registerCallback(std::bind(&ImageViewerNode::syncCallback, this, std::placeholders::_1, std::placeholders::_2));
+            sync_->registerCallback(std::bind(&ORBSLAM2Node::syncCallback, this, std::placeholders::_1, std::placeholders::_2));
 
         }
 
@@ -275,7 +277,7 @@ private:
 
 int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
-    auto node = std::make_shared<ImageViewerNode>();
+    auto node = std::make_shared<ORBSLAM2Node>(rclcpp::NodeOptions());
     rclcpp::spin(node);
     rclcpp::shutdown();
     return 0;

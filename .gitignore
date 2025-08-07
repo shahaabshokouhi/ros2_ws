@@ -1,7 +1,6 @@
 build/
 install/
 log/
-build_run.sh
 
 __pycache__/
 *.py[cod]
