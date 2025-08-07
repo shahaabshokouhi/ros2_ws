@@ -23,7 +23,11 @@ find_package(image_transport REQUIRED)
 find_package(message_filters REQUIRED)
 
 # ========== ORB_SLAM2 Local Build Paths ==========
-set(ORB_SLAM2_ROOT /home/shahab/Documents/Codes/ORB_SLAM2)
+if(NOT DEFINED ENV{ORB_SLAM2_ROOT})
+  message(FATAL_ERROR "\n\n ORB_SLAM2_ROOT environment variable is not defined.\nPlease set it in your shell, e.g.:\n\n    export ORB_SLAM2_ROOT=/home/jetson1/ORB_SLAM2\n\nThen run:\n\n    source ~/.bashrc\n    colcon build --packages-select your_package\n")
+endif()
+
+set(ORB_SLAM2_ROOT $ENV{ORB_SLAM2_ROOT})
 
 include_directories(
   include
