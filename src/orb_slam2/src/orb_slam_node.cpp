@@ -26,6 +26,10 @@ public:
 
             std::string vocab_file = this->declare_parameter<std::string>("vocab_file");
             std::string settings_file = this->declare_parameter<std::string>("settings_file");
+            
+            const std::string agent = this->get_name();
+            const std::string color_topic = std::string("/") + agent + std::string("/camera/realsense2_camera/color/image_raw");
+            const std::string depth_topic = std::string("/") + agent + std::string("/camera/realsense2_camera/depth/image_rect_raw");    
 
             slam_ = std::make_unique<ORB_SLAM2::System>(
                 vocab_file,
@@ -50,8 +54,8 @@ public:
                 "orb_slam2/path", 10);
             path_msg_.header.frame_id = "camera_color_optical_frame";
 
-            color_sub_.subscribe(this, "/camera/realsense2_camera/color/image_raw");
-            depth_sub_.subscribe(this, "/camera/realsense2_camera/depth/image_rect_raw");
+            color_sub_.subscribe(this, color_topic);
+            depth_sub_.subscribe(this, depth_topic);
                         
             sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(10), color_sub_, depth_sub_);
             sync_->registerCallback(std::bind(&ORBSLAM2Node::syncCallback, this, std::placeholders::_1, std::placeholders::_2));
