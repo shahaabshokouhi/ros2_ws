@@ -21,6 +21,7 @@
   <depend>tf2_geometry_msgs</depend>
   <depend>image_transport</depend>
   <depend>cv_bridge</depend>
+  <depend>orbslam2_msgs</depend>
 
   <!-- Testing dependencies -->
   <test_depend>ament_lint_auto</test_depend>

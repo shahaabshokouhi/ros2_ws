@@ -1,3 +1,6 @@
+#include <cstring>
+#include <array>
+
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <tf2/LinearMath/Quaternion.h>
@@ -13,8 +16,12 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 
+#include <orbslam2_msgs/msg/map_point.hpp>
+#include <orbslam2_msgs/msg/map_point_array.hpp>
+
 #include <MapPoint.h>
 #include <System.h>
+
 
 
 class ORBSLAM2Node : public rclcpp::Node {
@@ -50,6 +57,8 @@ public:
                 "orb_slam2/pointcloud", 10);
             pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
                 "orb_slam2/pose", 10);
+            mappoint_pub_ = this->create_publisher<orbslam2_msgs::msg::MapPointArray>(
+                "orb_slam2/mappoints", 10);
             path_pub_ = this->create_publisher<nav_msgs::msg::Path>(
                 "orb_slam2/path", 10);
             path_msg_.header.frame_id = "camera_color_optical_frame";
@@ -71,7 +80,7 @@ private:
         cv::Mat depth_normalized;
         cv::Mat bgr_image;
         cv::Mat Tcw;
-        std::vector<ORB_SLAM2::MapPoint*> vpHighObs;
+        std::vector<ORB_SLAM2::MapPoint*> vpHighQualityMapPoints;
         std::vector<float> points;
 
         // Process color image
@@ -108,8 +117,8 @@ private:
             depth_normalized,
             timestamp);
         
-            vpHighObs = slam_->GetHighQualityMapPoints();
-            std::cout << "High quality map points: " << vpHighObs.size() << std::endl;
+            vpHighQualityMapPoints = slam_->GetHighQualityMapPoints();
+            std::cout << "High quality map points: " << vpHighQualityMapPoints.size() << std::endl;
 
         }
         
@@ -124,6 +133,12 @@ private:
         cloud_msg.header.stamp = color_msg->header.stamp;
         cloud_msg.header.frame_id = "camera_color_optical_frame";
         cloud_msg.height = 1;
+
+        // Create MapPointArray message
+        orbslam2_msgs::msg::MapPointArray mappoints_msg;
+        mappoints_msg.header.stamp = color_msg->header.stamp;
+        mappoints_msg.header.frame_id = "camera_color_optical_frame";
+
 
         if (!Tcw.empty()) {
             cv::Mat tcw = Tcw.rowRange(0, 3).col(3);
@@ -159,10 +174,19 @@ private:
             path_msg_.poses.push_back(pose_msg);
             pose_pub_->publish(pose_msg);
 
+            if (publish_mappoints) {
+                mappoints_msg.points.reserve(vpHighQualityMapPoints.size());
+                for(auto* pMP : vpHighQualityMapPoints) {
+                    if (!pMP || pMP->isBad()) continue;
+                    mappoints_msg.points.push_back(toMsg(pMP));
+                }
+                mappoint_pub_->publish(mappoints_msg);
+            }
+
             // point cloud message
             if (publish_cloud){
 
-                for (ORB_SLAM2::MapPoint* pMP : vpHighObs){
+                for (ORB_SLAM2::MapPoint* pMP : vpHighQualityMapPoints){
                     if (!pMP || pMP->isBad()) continue;
                     cv::Mat pos = pMP->GetWorldPos();
 
@@ -221,41 +245,36 @@ private:
 
     }
 
-    void colorCallback(const sensor_msgs::msg::Image::ConstSharedPtr& msg) {
-        RCLCPP_INFO(this->get_logger(), "Received color image: width=%d, height=%d, encoding=%s",
-                    msg->width, msg->height, msg->encoding.c_str());
+    orbslam2_msgs::msg::MapPoint toMsg(ORB_SLAM2::MapPoint* pMP) {
+        orbslam2_msgs::msg::MapPoint m;
+        // ID
+        m.id = static_cast<uint64_t>(pMP->mnId);
 
-        try {
-            // Try converting to bgr8
-            auto cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::RGB8);
-            cv::Mat bgr_image;
-            cv::cvtColor(cv_ptr->image, bgr_image, cv::COLOR_RGB2BGR);
+        // position
+        const cv::Mat X = pMP->GetWorldPos();
+        m.position.x = static_cast<double>(X.at<float>(0));
+        m.position.y = static_cast<double>(X.at<float>(1));
+        m.position.z = static_cast<double>(X.at<float>(2));
 
-        } catch (cv_bridge::Exception& e) {
-            RCLCPP_ERROR(this->get_logger(), "cv_bridge exception (color): %s", e.what());
-        } catch (cv::Exception& e) {
-            RCLCPP_ERROR(this->get_logger(), "OpenCV exception (color): %s", e.what());
+        // noraml and distance invariance range
+        const cv::Mat n = pMP->GetNormal();
+        m.normal.x = static_cast<double>(n.at<float>(0));
+        m.normal.y = static_cast<double>(n.at<float>(1));
+        m.normal.z = static_cast<double>(n.at<float>(2));
+        m.min_distance = pMP->GetMinDistanceInvariance();
+        m.max_distance = pMP->GetMaxDistanceInvariance();
+
+        // orb descriptors (1X32 CV_8U)
+        const cv::Mat d = pMP->GetDescriptor();
+        if (d.cols != 32 || d.type() != CV_8U) {
+            RCLCPP_ERROR(this->get_logger(), "Invalid descriptor size or type");
+        } else {
+            std::memcpy(m.descriptor.data(), d.ptr<uint8_t>(), 32);
         }
-    }
+        m.is_bad = pMP->isBad();
+        m.stamp = this->get_clock()->now();
 
-    void depthCallback(const sensor_msgs::msg::Image::ConstSharedPtr& msg) {
-        RCLCPP_INFO(this->get_logger(), "Received depth image: width=%d, height=%d, encoding=%s",
-                    msg->width, msg->height, msg->encoding.c_str());
-
-        try {
-            auto cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::TYPE_16UC1);
-            
-            cv::Mat depth_normalized;
-            cv_ptr->image.convertTo(depth_normalized, CV_32FC1, 1.0 / 1000.0);
-            // Handle invalid values (set 0 in input to 0.0 in float matrix)
-            depth_normalized.setTo(0.0f, cv_ptr->image == 0);
-
-            // Log a sample value to verify conversion
-            RCLCPP_INFO(this->get_logger(), "Sample depth value (meters): %f", depth_normalized.at<float>(240, 320));
-
-        } catch (cv_bridge::Exception& e) {
-            RCLCPP_ERROR(this->get_logger(), "cv_bridge exception (depth): %s", e.what());
-        }
+        return m;
     }
 
     std::unique_ptr<ORB_SLAM2::System> slam_;
@@ -264,6 +283,7 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_pub_;
+    rclcpp::Publisher<orbslam2_msgs::msg::MapPointArray>::SharedPtr mappoint_pub_;
 
     message_filters::Subscriber<sensor_msgs::msg::Image> color_sub_;
     message_filters::Subscriber<sensor_msgs::msg::Image> depth_sub_;
@@ -276,7 +296,8 @@ private:
     float fy_ = 0.0f;
     float cx_ = 0.0f;
     float cy_ = 0.0f;
-    bool publish_cloud = true;
+    bool publish_cloud = false;
+    bool publish_mappoints = true;
 };
 
 int main(int argc, char** argv) {

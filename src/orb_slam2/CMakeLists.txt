@@ -21,6 +21,7 @@ find_package(realsense2 REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(message_filters REQUIRED)
+find_package(orbslam2_msgs REQUIRED)
 
 # ========== ORB_SLAM2 Local Build Paths ==========
 if(NOT DEFINED ENV{ORB_SLAM2_ROOT})
@@ -63,6 +64,7 @@ ament_target_dependencies(
   cv_bridge
   image_transport
   message_filters
+  orbslam2_msgs
 )
 
 target_link_libraries(orb_slam_node
