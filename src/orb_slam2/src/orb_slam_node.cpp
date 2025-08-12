@@ -34,9 +34,9 @@ public:
             std::string vocab_file = this->declare_parameter<std::string>("vocab_file");
             std::string settings_file = this->declare_parameter<std::string>("settings_file");
             
-            const std::string agent = this->get_name();
-            const std::string color_topic = std::string("/") + agent + std::string("/camera/realsense2_camera/color/image_raw");
-            const std::string depth_topic = std::string("/") + agent + std::string("/camera/realsense2_camera/depth/image_rect_raw");    
+            agent_name_ = this->get_name();
+            const std::string color_topic = std::string("/") + agent_name_ + std::string("/camera/realsense2_camera/color/image_raw");
+            const std::string depth_topic = std::string("/") + agent_name_ + std::string("/camera/realsense2_camera/depth/image_rect_raw");    
 
             slam_ = std::make_unique<ORB_SLAM2::System>(
                 vocab_file,
@@ -59,6 +59,8 @@ public:
                 "orb_slam2/pose", 10);
             mappoint_pub_ = this->create_publisher<orbslam2_msgs::msg::MapPointArray>(
                 "orb_slam2/mappoints", 10);
+            single_mappoint_pub_ = this->create_publisher<orbslam2_msgs::msg::MapPoint>(
+                "orb_slam2/single_mappoint", 10);
             path_pub_ = this->create_publisher<nav_msgs::msg::Path>(
                 "orb_slam2/path", 10);
             path_msg_.header.frame_id = "camera_color_optical_frame";
@@ -138,7 +140,7 @@ private:
         orbslam2_msgs::msg::MapPointArray mappoints_msg;
         mappoints_msg.header.stamp = color_msg->header.stamp;
         mappoints_msg.header.frame_id = "camera_color_optical_frame";
-
+        mappoints_msg.agent_name = agent_name_;
 
         if (!Tcw.empty()) {
             cv::Mat tcw = Tcw.rowRange(0, 3).col(3);
@@ -181,6 +183,15 @@ private:
                     mappoints_msg.points.push_back(toMsg(pMP));
                 }
                 mappoint_pub_->publish(mappoints_msg);
+            }
+
+            if (publish_single_mappoint && !vpHighQualityMapPoints.empty()) {
+                // Publish the first valid map point as a single message
+                for (auto* pMP : vpHighQualityMapPoints) {
+                    if (pMP && !pMP->isBad()) {
+                        single_mappoint_pub_->publish(toMsg(pMP));
+                    }
+                }
             }
 
             // point cloud message
@@ -248,6 +259,7 @@ private:
     orbslam2_msgs::msg::MapPoint toMsg(ORB_SLAM2::MapPoint* pMP) {
         orbslam2_msgs::msg::MapPoint m;
         // ID
+        m.agent_name = agent_name_;
         m.id = static_cast<uint64_t>(pMP->mnId);
 
         // position
@@ -284,6 +296,7 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_pub_;
     rclcpp::Publisher<orbslam2_msgs::msg::MapPointArray>::SharedPtr mappoint_pub_;
+    rclcpp::Publisher<orbslam2_msgs::msg::MapPoint>::SharedPtr single_mappoint_pub_;
 
     message_filters::Subscriber<sensor_msgs::msg::Image> color_sub_;
     message_filters::Subscriber<sensor_msgs::msg::Image> depth_sub_;
@@ -297,7 +310,9 @@ private:
     float cx_ = 0.0f;
     float cy_ = 0.0f;
     bool publish_cloud = false;
-    bool publish_mappoints = true;
+    bool publish_mappoints = false;
+    bool publish_single_mappoint = true;
+    std::string agent_name_;
 };
 
 int main(int argc, char** argv) {

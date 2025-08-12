@@ -1,6 +1,7 @@
 # Unique ID from the sender’s map
 uint64 id
 
+string agent_name
 # World position in the sender's frame
 geometry_msgs/Point position
 
