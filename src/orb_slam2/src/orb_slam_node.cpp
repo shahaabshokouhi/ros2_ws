@@ -118,9 +118,9 @@ private:
             bgr_image,
             depth_normalized,
             timestamp);
-        
-            vpHighQualityMapPoints = slam_->GetHighQualityMapPoints();
-            std::cout << "High quality map points: " << vpHighQualityMapPoints.size() << std::endl;
+
+            vpHighQualityMapPoints = slam_->PopNewHighQualityMapPoints();
+            std::cout << "Found " << vpHighQualityMapPoints.size() << " new MapPoints to publish" << std::endl;
 
         }
         
@@ -188,9 +188,11 @@ private:
             if (publish_single_mappoint && !vpHighQualityMapPoints.empty()) {
                 // Publish the first valid map point as a single message
                 for (auto* pMP : vpHighQualityMapPoints) {
-                    if (pMP && !pMP->isBad()) {
-                        single_mappoint_pub_->publish(toMsg(pMP));
-                    }
+                    if (!pMP || pMP->isBad()) continue;
+                    if (pMP->IsSentToOther()) continue;
+                    
+                    single_mappoint_pub_->publish(toMsg(pMP));
+                    pMP->SentToOther(true);
                 }
             }
 
