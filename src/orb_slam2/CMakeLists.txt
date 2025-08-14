@@ -51,9 +51,25 @@ link_directories(
 
 # ========== ROS 2 Node ==========
 add_executable(orb_slam_node src/orb_slam_node.cpp)
+add_executable(map_receiver src/map_receiver.cpp)
 
 ament_target_dependencies(
   orb_slam_node
+  rclcpp
+  std_msgs
+  sensor_msgs
+  geometry_msgs
+  nav_msgs
+  tf2
+  tf2_ros
+  cv_bridge
+  image_transport
+  message_filters
+  orbslam2_msgs
+)
+
+ament_target_dependencies(
+  map_receiver
   rclcpp
   std_msgs
   sensor_msgs
@@ -73,12 +89,29 @@ target_link_libraries(orb_slam_node
   ${OpenCV_LIBRARIES}
   ${Pangolin_LIBRARIES}
 )
+
+target_link_libraries(map_receiver
+  ORB_SLAM2
+  DBoW2
+  ${OpenCV_LIBRARIES}
+  ${Pangolin_LIBRARIES}
+)
+
 set_target_properties(orb_slam_node PROPERTIES
+  BUILD_WITH_INSTALL_RPATH TRUE
+  INSTALL_RPATH "${ORB_SLAM2_ROOT}/lib"
+)
+
+set_target_properties(map_receiver PROPERTIES
   BUILD_WITH_INSTALL_RPATH TRUE
   INSTALL_RPATH "${ORB_SLAM2_ROOT}/lib"
 )
 # ========== Install Targets ==========
 install(TARGETS orb_slam_node
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
+)
+
+install(TARGETS map_receiver
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 
