@@ -18,4 +18,4 @@ bool is_bad
 builtin_interfaces/Time stamp
 
 # (Optional) Reference keyframe id if you have it
-uint64 ref_kf_id
+uint64[] keyframe_ids

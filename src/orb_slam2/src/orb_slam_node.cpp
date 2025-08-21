@@ -21,6 +21,7 @@
 
 #include <MapPoint.h>
 #include <System.h>
+#include <KeyFrame.h>
 
 
 
@@ -207,28 +208,6 @@ private:
                     points.push_back(-pos.at<float>(0));
                     points.push_back(-pos.at<float>(1));
                 }
-                // for (int v = 0; v < depth_normalized.rows; ++v) {
-                //     for (int u = 0; u < depth_normalized.cols; ++u)
-                //     {
-                //         float depth = depth_normalized.at<float>(v, u);
-                //         if (depth > 3 || depth < 0.2) continue;
-                //         float z = depth;
-                //         float x = (u - cx_) * z / fx_;
-                //         float y = (v - cy_) * z / fy_;
-                        
-                //         // homogeneous coordinates
-                //         cv::Mat pt_cam = (cv::Mat_<float>(4, 1) << x, y, z, 1.0);
-
-                //         // transformation
-                //         cv::Mat pt_world = Twc * pt_cam;
-                        
-                //         points.push_back(pt_world.at<float>(2));
-                //         points.push_back(-pt_world.at<float>(0));
-                //         points.push_back(-pt_world.at<float>(1));
-
-                //     }
-                    
-                // }
 
                 cloud_msg.width = points.size() / 3;
                 cloud_msg.is_dense = false;
@@ -287,6 +266,16 @@ private:
         }
         m.is_bad = pMP->isBad();
         m.stamp = this->get_clock()->now();
+
+        const std::map<ORB_SLAM2::KeyFrame*, size_t> obs = pMp->GetObservations();
+        m.keyframe_ids.reserve(obs.size());
+        for (std::map<ORB_SLAM2::KeyFrame*, size_t>::const_iterator it = obs.begin();
+            it != obs.end(); ++it) 
+        {
+            ORB_SLAM2::KeyFrame* pKF = it->first;
+            if (!pKF || pKF->isBad()) continue;
+            m.keyframe_ids.push_back(static_cast<uint64_t>(pKF->mnId));
+        }
 
         return m;
     }
