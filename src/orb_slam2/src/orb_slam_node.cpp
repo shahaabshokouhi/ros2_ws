@@ -267,7 +267,7 @@ private:
         m.is_bad = pMP->isBad();
         m.stamp = this->get_clock()->now();
 
-        const std::map<ORB_SLAM2::KeyFrame*, size_t> obs = pMp->GetObservations();
+        const std::map<ORB_SLAM2::KeyFrame*, size_t> obs = pMP->GetObservations();
         m.keyframe_ids.reserve(obs.size());
         for (std::map<ORB_SLAM2::KeyFrame*, size_t>::const_iterator it = obs.begin();
             it != obs.end(); ++it) 
