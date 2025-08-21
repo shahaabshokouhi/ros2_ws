@@ -52,6 +52,7 @@ link_directories(
 # ========== ROS 2 Node ==========
 add_executable(orb_slam_node src/orb_slam_node.cpp)
 add_executable(map_receiver src/map_receiver.cpp)
+add_executable(agent_cloud_fanout src/agent_cloud_fanout.cpp)
 
 ament_target_dependencies(
   orb_slam_node
@@ -83,6 +84,15 @@ ament_target_dependencies(
   orbslam2_msgs
 )
 
+ament_target_dependencies(
+  agent_cloud_fanout
+  rclcpp
+  std_msgs
+  sensor_msgs
+  geometry_msgs
+  orbslam2_msgs
+)
+
 target_link_libraries(orb_slam_node
   ORB_SLAM2
   DBoW2
@@ -106,12 +116,22 @@ set_target_properties(map_receiver PROPERTIES
   BUILD_WITH_INSTALL_RPATH TRUE
   INSTALL_RPATH "${ORB_SLAM2_ROOT}/lib"
 )
+
+set_target_properties(agent_cloud_fanout PROPERTIES
+  BUILD_WITH_INSTALL_RPATH TRUE
+  INSTALL_RPATH "${ORB_SLAM2_ROOT}/lib"
+)
+
 # ========== Install Targets ==========
 install(TARGETS orb_slam_node
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 
 install(TARGETS map_receiver
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
+)
+
+install(TARGETS agent_cloud_fanout
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 
