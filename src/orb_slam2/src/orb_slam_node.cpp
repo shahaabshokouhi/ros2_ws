@@ -68,6 +68,11 @@ public:
 
             color_sub_.subscribe(this, color_topic);
             depth_sub_.subscribe(this, depth_topic);
+
+            using std::placeholders::_1;
+            mappoint_sub_ = this->create_subscription<orbslam2_msgs::msg::MapPoint>(
+                "/orb_slam2/single_mappoint", 10,
+                std::bind(&ORBSLAM2Node::importMapPointCallback, this, _1));
                         
             sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(10), color_sub_, depth_sub_);
             sync_->registerCallback(std::bind(&ORBSLAM2Node::syncCallback, this, std::placeholders::_1, std::placeholders::_2));
@@ -121,15 +126,20 @@ private:
             timestamp);
 
             vpHighQualityMapPoints = slam_->PopNewHighQualityMapPoints();
-            std::cout << "Found " << vpHighQualityMapPoints.size() << " new MapPoints to publish" << std::endl;
+            if (vpHighQualityMapPoints.size()){
+                std::cout << "Found " << vpHighQualityMapPoints.size() << " new MapPoints to publish" << std::endl;
+                for (const auto &kv : slam_->mpHQmanager->mImportedPointsByAgent)
+                    std::cout << kv.first << ": " << kv.second.size() << " points" << std::endl;
+            }
+
+            for (const auto &kv : slam_->mpHQmanager->mImportedPointsByAgent)
+                std::cout << kv.first << ": " << kv.second.size() << " points" << std::endl;
 
         }
         
         if (Tcw.empty()) {
-            RCLCPP_WARN(this->get_logger(), "Tracking failed");
-        } else {
-            RCLCPP_INFO(this->get_logger(), "Tracking succeeded");
-        }
+            RCLCPP_WARN(this->get_logger(), "Tracking failed");}
+    
 
         // Create PointCloud2 message
         sensor_msgs::msg::PointCloud2 cloud_msg;
@@ -280,6 +290,44 @@ private:
         return m;
     }
 
+    void importMapPointCallback(const orbslam2_msgs::msg::MapPoint::SharedPtr msg)
+    {
+
+        cv::Mat pos = (cv::Mat_<float>(3,1) <<
+            msg->position.x,
+            msg->position.y,
+            msg->position.z);
+
+        cv::Mat n = (cv::Mat_<float>(3,1) <<
+            msg->normal.x,
+            msg->normal.y,
+            msg->normal.z);
+
+        cv::Mat desc(1, 32, CV_8U);
+        std::memcpy(desc.ptr<uint8_t>(), msg->descriptor.data(), 32);
+
+        std::vector<int> keyframe_ids(msg->keyframe_ids.begin(), msg->keyframe_ids.end());
+
+        auto* pMP = new ORB_SLAM2::MapPoint(
+            msg->id,
+            pos,
+            n,
+            desc,
+            msg->min_distance,
+            msg->max_distance,
+            msg->is_bad,
+            keyframe_ids);
+
+        auto &agentVec = mImportedPointsByAgent[msg->agent_name];
+        agentVec.push_back(pMP);
+
+        if (agentVec.size() >= kBatchSize) {
+            slam_->mpHQmanager->ImportHighQualityMapPoints(msg->agent_name, agentVec);
+            agentVec.clear();
+        }
+    }
+
+
     std::unique_ptr<ORB_SLAM2::System> slam_;
     nav_msgs::msg::Path path_msg_;
 
@@ -291,6 +339,8 @@ private:
 
     message_filters::Subscriber<sensor_msgs::msg::Image> color_sub_;
     message_filters::Subscriber<sensor_msgs::msg::Image> depth_sub_;
+    rclcpp::Subscription<orbslam2_msgs::msg::MapPoint>::SharedPtr mappoint_sub_;
+
     using SyncPolicy = message_filters::sync_policies::ApproximateTime<
         sensor_msgs::msg::Image, sensor_msgs::msg::Image>;
 
@@ -304,6 +354,8 @@ private:
     bool publish_mappoints = false;
     bool publish_single_mappoint = true;
     std::string agent_name_;
+    std::map<std::string, std::vector<ORB_SLAM2::MapPoint*>> mImportedPointsByAgent;
+    size_t kBatchSize = 50;
 };
 
 int main(int argc, char** argv) {
