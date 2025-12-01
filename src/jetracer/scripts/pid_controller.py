@@ -10,7 +10,7 @@ from geometry_msgs.msg import Twist
 # Example possibilities:
 #   from vicon_receiver.msg import Position
 #   from my_vicon_msgs.msg import Position
-from vicon_receiver.msg import Position  # <-- FIX THIS
+from orbslam2_msgs.msg import Position  # <-- FIX THIS
 
 
 def normalize_angle(angle: float) -> float:

@@ -10,6 +10,7 @@ find_package(builtin_interfaces REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MapPoint.msg"
   "msg/MapPointArray.msg"
+  "msg/Position.msg"
   DEPENDENCIES builtin_interfaces geometry_msgs std_msgs
 )
 
