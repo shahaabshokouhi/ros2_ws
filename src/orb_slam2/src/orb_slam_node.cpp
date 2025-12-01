@@ -42,7 +42,7 @@ public:
             slam_ = std::make_unique<ORB_SLAM2::System>(
                 vocab_file,
                 settings_file,
-                ORB_SLAM2::System::RGBD, false);
+                ORB_SLAM2::System::RGBD, false, agent_name_);
 
             cv::FileStorage fsettings(
                 settings_file,
@@ -126,14 +126,14 @@ private:
             timestamp);
 
             vpHighQualityMapPoints = slam_->PopNewHighQualityMapPoints();
-            if (vpHighQualityMapPoints.size()){
-                std::cout << "Found " << vpHighQualityMapPoints.size() << " new MapPoints to publish" << std::endl;
-                for (const auto &kv : slam_->mpHQmanager->mImportedPointsByAgent)
-                    std::cout << kv.first << ": " << kv.second.size() << " points" << std::endl;
-            }
+            // if (vpHighQualityMapPoints.size()){
+            //     std::cout << "Found " << vpHighQualityMapPoints.size() << " new MapPoints to publish" << std::endl;
+            //     for (const auto &kv : slam_->mpHQmanager->mImportedPointsByAgent)
+            //         std::cout << kv.first << ": " << kv.second.size() << " points" << std::endl;
+            // }
 
-            for (const auto &kv : slam_->mpHQmanager->mImportedPointsByAgent)
-                std::cout << kv.first << ": " << kv.second.size() << " points" << std::endl;
+            // for (const auto &kv : slam_->mpHQmanager->mImportedPointsByAgent)
+            //     std::cout << kv.first << ": " << kv.second.size() << " points" << std::endl;
 
         }
         
