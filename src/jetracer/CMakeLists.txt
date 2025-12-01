@@ -27,4 +27,10 @@ install(PROGRAMS
   scripts/teleop_joy.py
   DESTINATION lib/${PROJECT_NAME}
 )
+
+install(PROGRAMS
+  scripts/pid_controller.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()

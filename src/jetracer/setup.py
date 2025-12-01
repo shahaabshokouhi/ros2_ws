@@ -7,9 +7,13 @@ setup(
     version='0.0.0',
     packages=[package_name],
     data_files=[
-        ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
+        ('share/ament_index/resource_index/packages',
+            ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name + '/launch', ['launch/joy.launch.py']),
+        ('share/' + package_name + '/launch', [
+            'launch/joy.launch.py',
+            'launch/jetracer_vicon_pid.launch.py',   # <-- add new launch file here
+        ]),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -20,7 +24,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'teleop_joy = scripts.teleop_joy:main'
+            'teleop_joy = scripts.teleop_joy:main',
+            'pid_controlller = scripts.pid_controller:main',
         ],
     },
 )
