@@ -10,8 +10,7 @@ from geometry_msgs.msg import Twist
 # Example possibilities:
 #   from vicon_receiver.msg import Position
 #   from my_vicon_msgs.msg import Position
-from orbslam2_msgs.msg import Position  # <-- FIX THIS
-
+from geometry_msgs.msg import PoseStamped
 
 def normalize_angle(angle: float) -> float:
     """Wrap angle to [-pi, pi]."""
@@ -87,8 +86,8 @@ class ViconPIDWaypointFollower(Node):
         self.get_logger().info(f'Subscribing to Vicon topic: {vicon_topic}')
 
         self.subscription = self.create_subscription(
-            Position,
-            vicon_topic,
+            PoseStamped,
+            '/vicon/agent_0/agent_0',
             self.vicon_callback,
             10
         )
@@ -154,15 +153,14 @@ class ViconPIDWaypointFollower(Node):
             # You probably want global coordinates for this controller
             self.get_logger().warn_once('Vicon translation is not Global; controller expects Global frame.')
 
-        self.x = msg.x_trans
-        self.y = msg.y_trans
-        self.z = msg.z_trans
+        self.x = msg.pose.position.x
+        self.y = msg.pose.position.y
+        self.z = msg.pose.position.z
 
-        # Quaternion is (x_rot, y_rot, z_rot, w)
-        qx = msg.x_rot
-        qy = msg.y_rot
-        qz = msg.z_rot
-        qw = msg.w
+        qx = msg.pose.orientation.x
+        qy = msg.pose.orientation.y
+        qz = msg.pose.orientation.z
+        qw = msg.pose.orientation.w
 
         # Compute yaw from quaternion
         # Formula for yaw (Z axis) from quaternion (x,y,z,w)
