@@ -9,9 +9,10 @@ from nav_msgs.msg import Odometry
 class OdomEKF(Node):
     def __init__(self):
         super().__init__('odom_ekf')
-        self.ekf_pub = self.create_publisher(Odometry, 'odom', 10)
+        self.declare_parameter('agent_name','agent_0')
+        self.ekf_pub = self.create_publisher(Odometry, agent_name + '/odom', 10)
         self.create_subscription(PoseWithCovarianceStamped,
-        'odom_combined',
+        agent_name + '/odom_combined',
         self.pub_ekf_odom,
         10)
 

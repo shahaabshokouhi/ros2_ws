@@ -43,6 +43,7 @@ public:
     // Parameters
     port_name_ = this->declare_parameter("port_name", "/dev/ttyACM0");
     publish_tf_ = this->declare_parameter("publish_odom_transform", true);
+    agent_name_ = this->declare_parameter("agent_name", "agent_0");
 
     // Open serial port
     try {
@@ -62,17 +63,17 @@ public:
     }
 
     // Publishers & TF
-    imu_pub_  = this->create_publisher<sensor_msgs::msg::Imu>("imu", 10);
-    odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("odom", 10);
-    lvel_pub_ = this->create_publisher<std_msgs::msg::Int32>("motor/lvel", 10);
-    rvel_pub_ = this->create_publisher<std_msgs::msg::Int32>("motor/rvel", 10);
-    lset_pub_ = this->create_publisher<std_msgs::msg::Int32>("motor/lset", 10);
-    rset_pub_ = this->create_publisher<std_msgs::msg::Int32>("motor/rset", 10);
+    imu_pub_  = this->create_publisher<sensor_msgs::msg::Imu>(agent_name_ + "/imu", 10);
+    odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>(agent_name_ + "/odom", 10);
+    lvel_pub_ = this->create_publisher<std_msgs::msg::Int32>(agent_name_ + "/motor/lvel", 10);
+    rvel_pub_ = this->create_publisher<std_msgs::msg::Int32>(agent_name_ + "/motor/rvel", 10);
+    lset_pub_ = this->create_publisher<std_msgs::msg::Int32>(agent_name_ + "/motor/lset", 10);
+    rset_pub_ = this->create_publisher<std_msgs::msg::Int32>(agent_name_ + "/motor/rset", 10);
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
     // cmd_vel subscriber
     cmd_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
-      "cmd_vel", 10,
+      agent_name_ + "/cmd_vel", 10,
       std::bind(&JetracerBridge::cmdVelCallback, this, std::placeholders::_1)
     );
 
@@ -235,6 +236,7 @@ private:
   boost::asio::serial_port serial_;
   std::string port_name_;
   bool publish_tf_;
+  std::string agent_name_;
 
   double x_{0}, y_{0}, yaw_{0};
   rclcpp::Time last_cmd_time_;

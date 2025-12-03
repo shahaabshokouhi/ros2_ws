@@ -72,7 +72,7 @@ class ViconPIDWaypointFollower(Node):
         self.declare_parameter('agent_name', 'agent_0')
         self.declare_parameter('control_rate', 1.0)          # Hz
         self.declare_parameter('pos_tolerance', 0.2)         # meters
-        self.declare_parameter('max_linear_speed', 0.3)       # m/s
+        self.declare_parameter('max_linear_speed', 0.2)       # m/s
         self.declare_parameter('max_angular_speed', 0.3)      # rad/s
 
         # Simple gains (tune these!)
@@ -92,7 +92,7 @@ class ViconPIDWaypointFollower(Node):
             10
         )
 
-        self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 10)
+        self.cmd_pub = self.create_publisher(Twist, agent_name + '/cmd_vel', 10)
 
         control_rate = self.get_parameter('control_rate').get_parameter_value().double_value
         self.dt = 1.0 / control_rate

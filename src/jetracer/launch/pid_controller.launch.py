@@ -15,7 +15,7 @@ def generate_launch_description():
 
         DeclareLaunchArgument(
             'agent_name',
-            default_value='agen_0',
+            default_value='agent_0',
             description='Vicon subject/segment name used in /vicon/<agent>/<agent> topic'
         ),
 
@@ -47,56 +47,57 @@ def generate_launch_description():
             parameters=[
                 {'use_sim_time': LaunchConfiguration('use_sim_time')},
                 {'port_name': '/dev/ttyACM0'},
-                {'publish_odom_transform': False}
+                {'publish_odom_transform': False},
+                {'agent_name': LaunchConfiguration('agent_name')},
             ],
             remappings=[
                 ('/odom', '/odom_raw')
             ]
         ),
 
-        # --- EKF Localization Node ---
-        Node(
-            package='robot_localization',
-            executable='ekf_node',
-            name='robot_pose_ekf',
-            output='screen',
-            parameters=[
-                {'use_sim_time': LaunchConfiguration('use_sim_time')},
+        # # --- EKF Localization Node ---
+        # Node(
+        #     package='robot_localization',
+        #     executable='ekf_node',
+        #     name='robot_pose_ekf',
+        #     output='screen',
+        #     parameters=[
+        #         {'use_sim_time': LaunchConfiguration('use_sim_time')},
 
-                # Frame settings
-                {'world_frame': 'odom'},
-                {'base_link_frame': 'base_footprint'},
+        #         # Frame settings
+        #         {'world_frame': 'odom'},
+        #         {'base_link_frame': 'base_footprint'},
 
-                # Update frequency and timeouts
-                {'frequency': 30.0},
-                {'sensor_timeout': 0.5},
+        #         # Update frequency and timeouts
+        #         {'frequency': 30.0},
+        #         {'sensor_timeout': 0.5},
 
-                # Odometry source
-                {'odom0': '/odom_raw'},
-                {'odom0_config': [True, True, False,
-                                  False, False, False]},
-                {'use_odometry': True},
+        #         # Odometry source
+        #         {'odom0': '/odom_raw'},
+        #         {'odom0_config': [True, True, False,
+        #                           False, False, False]},
+        #         {'use_odometry': True},
 
-                # IMU source
-                {'imu0': '/imu'},
-                {'imu0_config': [False, False, False,
-                                 True, True, True]},
-                {'use_imu': True},
+        #         # IMU source
+        #         {'imu0': '/imu'},
+        #         {'imu0_config': [False, False, False,
+        #                          True, True, True]},
+        #         {'use_imu': True},
 
-                # Disable visual odometry
-                {'vo0': ''},
-                {'use_vo': False},
+        #         # Disable visual odometry
+        #         {'vo0': ''},
+        #         {'use_vo': False},
 
-                # Debug
-                {'debug': False},
-                {'self_diagnostics': False},
-            ],
-            remappings=[
-                ('/odom_raw', '/odom_raw'),
-                ('imu', '/imu'),
-                ('/odometry/filtered', '/odom_combined')
-            ],
-        ),
+        #         # Debug
+        #         {'debug': False},
+        #         {'self_diagnostics': False},
+        #     ],
+        #     remappings=[
+        #         ('/odom_raw', '/odom_raw'),
+        #         ('imu', '/imu'),
+        #         ('/odometry/filtered', '/odom_combined')
+        #     ],
+        # ),
 
         # --- Static transform base_footprint -> IMU ---
         Node(
