@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 cd ~/ros2_ws
 rm -rf build install log
 colcon build --packages-select orbslam2_msgs --symlink-install

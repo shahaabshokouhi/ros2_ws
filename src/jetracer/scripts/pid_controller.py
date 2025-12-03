@@ -63,22 +63,22 @@ class PID:
 
         return output
 
-
+ 
 class ViconPIDWaypointFollower(Node):
     def __init__(self):
         super().__init__('pid_controller')
 
         # Parameters
         self.declare_parameter('agent_name', 'agent_0')
-        self.declare_parameter('control_rate', 50.0)          # Hz
-        self.declare_parameter('pos_tolerance', 0.05)         # meters
-        self.declare_parameter('max_linear_speed', 0.7)       # m/s
-        self.declare_parameter('max_angular_speed', 1.5)      # rad/s
+        self.declare_parameter('control_rate', 1.0)          # Hz
+        self.declare_parameter('pos_tolerance', 0.2)         # meters
+        self.declare_parameter('max_linear_speed', 0.3)       # m/s
+        self.declare_parameter('max_angular_speed', 0.3)      # rad/s
 
         # Simple gains (tune these!)
-        self.declare_parameter('kp_dist', 1.0)
-        self.declare_parameter('kp_yaw', 2.0)
-        self.declare_parameter('kd_yaw', 0.1)
+        self.declare_parameter('kp_dist', 20.0)
+        self.declare_parameter('kp_yaw', 0.5)
+        self.declare_parameter('kd_yaw', 0.0)
 
         agent_name = self.get_parameter('agent_name').get_parameter_value().string_value
 
@@ -87,7 +87,7 @@ class ViconPIDWaypointFollower(Node):
 
         self.subscription = self.create_subscription(
             PoseStamped,
-            '/vicon/agent_0/agent_0',
+            vicon_topic,
             self.vicon_callback,
             10
         )
@@ -100,10 +100,11 @@ class ViconPIDWaypointFollower(Node):
         # Waypoints: list of (x, y, z). You can change this or load from a file/parameter.
         # Make sure they are in the same coordinate frame as your Vicon "Global" translation.
         self.waypoints: List[Tuple[float, float, float]] = [
-            (0.0, 0.0, 0.0),
-            (1.0, 0.0, 0.0),
-            (1.0, 1.0, 0.0),
-            (0.0, 1.0, 0.0),
+            (2.05, 2.05, 0.0),
+            (-2.05, 2.05, 0.0),
+            (-2.05, 0.5, 0.0),
+            (2.0, 0.5, 0.0),
+
         ]
         self.current_wp_index = 0
 
@@ -134,7 +135,7 @@ class ViconPIDWaypointFollower(Node):
 
     # ---------- Callbacks ----------
 
-    def vicon_callback(self, msg: Position):
+    def vicon_callback(self, msg: PoseStamped):
         """
         Position.msg:
         float32 x_trans 
@@ -149,9 +150,6 @@ class ViconPIDWaypointFollower(Node):
         int32 frame_number
         string translation_type
         """
-        if msg.translation_type.lower() != 'global':
-            # You probably want global coordinates for this controller
-            self.get_logger().warn_once('Vicon translation is not Global; controller expects Global frame.')
 
         self.x = msg.pose.position.x
         self.y = msg.pose.position.y
@@ -169,6 +167,8 @@ class ViconPIDWaypointFollower(Node):
         cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
         self.yaw = math.atan2(siny_cosp, cosy_cosp)
 
+        # self.get_logger().info(f'X: {self.x}, Y: {self.y}, Yaw: {self.yaw}')
+
         self.have_pose = True
 
     # ---------- Control Loop ----------
@@ -176,15 +176,19 @@ class ViconPIDWaypointFollower(Node):
     def control_loop(self):
         now = self.get_clock().now()
         dt = (now - self.last_time).nanoseconds * 1e-9
+        self.get_logger().info("debug 0")
+
         if dt <= 0.0:
             dt = self.dt
         self.last_time = now
 
         if not self.have_pose:
+            self.get_logger().info("debug 1")
             # No feedback yet
             return
 
         if self.current_wp_index >= len(self.waypoints):
+            self.get_logger().info("debug 2")
             # Finished all waypoints: stop
             cmd = Twist()
             self.cmd_pub.publish(cmd)
@@ -196,11 +200,13 @@ class ViconPIDWaypointFollower(Node):
         # Position errors in world frame
         ex = tx - self.x
         ey = ty - self.y
+
+        self.get_logger().info(f'error x: {ex}, error y: {ey}')
         # ez = tz - self.z  # If you want to control altitude for a drone
 
         dist_error = math.hypot(ex, ey)
         pos_tolerance = self.get_parameter('pos_tolerance').get_parameter_value().double_value
-
+        self.get_logger().info(f'Dist error: {dist_error}')
         # Check if we reached current waypoint
         if dist_error < pos_tolerance:
             self.get_logger().info(
@@ -214,10 +220,11 @@ class ViconPIDWaypointFollower(Node):
 
             # Stop if finished
             if self.current_wp_index >= len(self.waypoints):
-                cmd = Twist()
-                self.cmd_pub.publish(cmd)
-                self.get_logger().info('All waypoints completed.')
-                return
+                self.current_wp_index = 0
+                # cmd = Twist()
+                # self.cmd_pub.publish(cmd)
+                # self.get_logger().info('All waypoints completed.')
+                # return
             else:
                 # Use new target for control this cycle
                 target = self.waypoints[self.current_wp_index]
@@ -233,11 +240,11 @@ class ViconPIDWaypointFollower(Node):
         # PID outputs
         v = self.pid_dist.update(dist_error, dt)  # linear velocity
         w = self.pid_yaw.update(yaw_error, dt)    # angular velocity
-
         # Optionally reduce forward speed when yaw error is large
         # e.g., simple scaling:
-        angle_factor = max(0.0, math.cos(yaw_error))
-        v *= angle_factor
+        # angle_factor = max(0.0, math.cos(yaw_error))
+        # v *= angle_factor
+        # self.get_logger().info(f'pid output: v: {v}, w: {w}')
 
         cmd = Twist()
         cmd.linear.x = v
