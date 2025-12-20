@@ -23,6 +23,11 @@
 #include <System.h>
 #include <KeyFrame.h>
 
+#include <atomic>
+#include <unordered_map>
+#include <mutex>
+
+
 
 
 class ORBSLAM2Node : public rclcpp::Node {
@@ -54,6 +59,8 @@ public:
             cx_ = fsettings["Camera.cx"];
             cy_ = fsettings["Camera.cy"];
 
+            auto qos = rclcpp::QoS(rclcpp::KeepLast(5000)).reliable().durability_volatile();
+
             pointcloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
                 "orb_slam2/pointcloud", 10);
             pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
@@ -61,7 +68,7 @@ public:
             mappoint_pub_ = this->create_publisher<orbslam2_msgs::msg::MapPointArray>(
                 "orb_slam2/mappoints", 10);
             single_mappoint_pub_ = this->create_publisher<orbslam2_msgs::msg::MapPoint>(
-                "orb_slam2/single_mappoint", 10);
+                "orb_slam2/single_mappoint", qos);
             path_pub_ = this->create_publisher<nav_msgs::msg::Path>(
                 "orb_slam2/path", 10);
             path_msg_.header.frame_id = "camera_color_optical_frame";
@@ -71,11 +78,34 @@ public:
 
             using std::placeholders::_1;
             mappoint_sub_ = this->create_subscription<orbslam2_msgs::msg::MapPoint>(
-                "/orb_slam2/single_mappoint", 10,
+                "/orb_slam2/single_mappoint", qos,
                 std::bind(&ORBSLAM2Node::importMapPointCallback, this, _1));
                         
             sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(10), color_sub_, depth_sub_);
             sync_->registerCallback(std::bind(&ORBSLAM2Node::syncCallback, this, std::placeholders::_1, std::placeholders::_2));
+
+            // debugging --------------------
+            statsTimer_ = this->create_wall_timer(
+                std::chrono::seconds(1),
+                [this]() {
+                    uint64_t pub = publishedCount_.load();
+                    uint64_t rec = receivedCount_.load();
+                    uint64_t imp = importedCount_.load();
+
+                    RCLCPP_INFO(this->get_logger(),
+                    "[MP STATS] published=%lu received=%lu imported=%lu (recv/pub=%.2f%%)",
+                    pub, rec, imp,
+                    (pub ? (100.0 * double(rec) / double(pub)) : 0.0)
+                    );
+
+                    // Optional per-agent dump (not every second if it’s too spammy)
+                    std::lock_guard<std::mutex> lk(perAgentMtx_);
+                    for (auto &kv : receivedByAgent_) {
+                    RCLCPP_INFO(this->get_logger(), "  [MP STATS] receivedByAgent[%s]=%lu",
+                                kv.first.c_str(), kv.second);
+                    }
+                }
+            );
 
         }
 
@@ -203,6 +233,7 @@ private:
                     if (pMP->IsSentToOther()) continue;
                     
                     single_mappoint_pub_->publish(toMsg(pMP));
+                    publishedCount_++;
                     pMP->SentToOther(true);
                 }
             }
@@ -293,6 +324,14 @@ private:
     void importMapPointCallback(const orbslam2_msgs::msg::MapPoint::SharedPtr msg)
     {
 
+        // debugging ---
+        receivedCount_++;
+        {
+        std::lock_guard<std::mutex> lk(perAgentMtx_);
+        receivedByAgent_[msg->agent_name] += 1;
+        }
+        // ------------------------
+
         cv::Mat pos = (cv::Mat_<float>(3,1) <<
             msg->position.x,
             msg->position.y,
@@ -323,10 +362,25 @@ private:
 
         if (agentVec.size() >= kBatchSize) {
             slam_->mpHQmanager->ImportHighQualityMapPoints(msg->agent_name, agentVec);
+            importedCount_ += agentVec.size();  // should be 50 here
             agentVec.clear();
         }
     }
 
+    
+    // debuggin the mappoint sender issue------------------------
+    std::atomic<uint64_t> publishedCount_{0};
+    std::atomic<uint64_t> receivedCount_{0};
+    std::atomic<uint64_t> importedCount_{0};
+
+    // Per-agent received counters
+    std::mutex perAgentMtx_;
+    std::unordered_map<std::string, uint64_t> receivedByAgent_;
+
+    // Log timer
+    rclcpp::TimerBase::SharedPtr statsTimer_;
+
+    //---------------------------------------------------------
 
     std::unique_ptr<ORB_SLAM2::System> slam_;
     nav_msgs::msg::Path path_msg_;
