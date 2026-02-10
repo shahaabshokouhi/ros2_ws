@@ -85,27 +85,27 @@ public:
             sync_->registerCallback(std::bind(&ORBSLAM2Node::syncCallback, this, std::placeholders::_1, std::placeholders::_2));
 
             // debugging --------------------
-            statsTimer_ = this->create_wall_timer(
-                std::chrono::seconds(1),
-                [this]() {
-                    uint64_t pub = publishedCount_.load();
-                    uint64_t rec = receivedCount_.load();
-                    uint64_t imp = importedCount_.load();
+            // statsTimer_ = this->create_wall_timer(
+            //     std::chrono::seconds(1),
+            //     [this]() {
+            //         uint64_t pub = publishedCount_.load();
+            //         uint64_t rec = receivedCount_.load();
+            //         uint64_t imp = importedCount_.load();
 
-                    RCLCPP_INFO(this->get_logger(),
-                    "[MP STATS] published=%lu received=%lu imported=%lu (recv/pub=%.2f%%)",
-                    pub, rec, imp,
-                    (pub ? (100.0 * double(rec) / double(pub)) : 0.0)
-                    );
+            //         RCLCPP_INFO(this->get_logger(),
+            //         "[MP STATS] published=%lu received=%lu imported=%lu (recv/pub=%.2f%%)",
+            //         pub, rec, imp,
+            //         (pub ? (100.0 * double(rec) / double(pub)) : 0.0)
+            //         );
 
-                    // Optional per-agent dump (not every second if it’s too spammy)
-                    std::lock_guard<std::mutex> lk(perAgentMtx_);
-                    for (auto &kv : receivedByAgent_) {
-                    RCLCPP_INFO(this->get_logger(), "  [MP STATS] receivedByAgent[%s]=%lu",
-                                kv.first.c_str(), kv.second);
-                    }
-                }
-            );
+            //         // Optional per-agent dump (not every second if it’s too spammy)
+            //         std::lock_guard<std::mutex> lk(perAgentMtx_);
+            //         for (auto &kv : receivedByAgent_) {
+            //         RCLCPP_INFO(this->get_logger(), "  [MP STATS] receivedByAgent[%s]=%lu",
+            //                     kv.first.c_str(), kv.second);
+            //         }
+            //     }
+            // );
 
         }
 

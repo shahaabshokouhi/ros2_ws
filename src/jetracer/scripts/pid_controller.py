@@ -176,19 +176,18 @@ class ViconPIDWaypointFollower(Node):
     def control_loop(self):
         now = self.get_clock().now()
         dt = (now - self.last_time).nanoseconds * 1e-9
-        self.get_logger().info("debug 0")
 
         if dt <= 0.0:
             dt = self.dt
         self.last_time = now
 
         if not self.have_pose:
-            self.get_logger().info("debug 1")
+            self.get_logger().info("No feedback, waiting")
             # No feedback yet
             return
 
         if self.current_wp_index >= len(self.waypoints):
-            self.get_logger().info("debug 2")
+            self.get_logger().info("Finished all waypoints")
             # Finished all waypoints: stop
             cmd = Twist()
             self.cmd_pub.publish(cmd)
@@ -201,12 +200,12 @@ class ViconPIDWaypointFollower(Node):
         ex = tx - self.x
         ey = ty - self.y
 
-        self.get_logger().info(f'error x: {ex}, error y: {ey}')
+        # self.get_logger().info(f'error x: {ex}, error y: {ey}')
         # ez = tz - self.z  # If you want to control altitude for a drone
 
         dist_error = math.hypot(ex, ey)
         pos_tolerance = self.get_parameter('pos_tolerance').get_parameter_value().double_value
-        self.get_logger().info(f'Dist error: {dist_error}')
+        # self.get_logger().info(f'Dist error: {dist_error}')
         # Check if we reached current waypoint
         if dist_error < pos_tolerance:
             self.get_logger().info(
