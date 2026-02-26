@@ -1,0 +1,7 @@
+# Waypoints for the PID waypoint follower.
+# Each entry is [x, y, z] in the Vicon global frame (meters).
+waypoints:
+  - [2.05,  2.05, 0.0]
+  - [-2.05, 2.05, 0.0]
+  - [-2.05, 0.5,  0.0]
+  - [2.0,   0.5,  0.0]

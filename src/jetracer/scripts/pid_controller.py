@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+import yaml
 from typing import List, Tuple
 
 import rclpy
@@ -71,14 +72,15 @@ class ViconPIDWaypointFollower(Node):
         # Parameters
         self.declare_parameter('agent_name', 'agent_0')
         self.declare_parameter('control_rate', 1.0)          # Hz
-        self.declare_parameter('pos_tolerance', 0.2)         # meters
+        self.declare_parameter('pos_tolerance', 0.4)         # meters
         self.declare_parameter('max_linear_speed', 0.1)       # m/s
-        self.declare_parameter('max_angular_speed', 0.3)      # rad/s
+        self.declare_parameter('max_angular_speed', 0.2)      # rad/s
 
         # Simple gains (tune these!)
         self.declare_parameter('kp_dist', 20.0)
         self.declare_parameter('kp_yaw', 0.5)
         self.declare_parameter('kd_yaw', 0.0)
+        self.declare_parameter('waypoints_file', '')
 
         agent_name = self.get_parameter('agent_name').get_parameter_value().string_value
 
@@ -97,15 +99,9 @@ class ViconPIDWaypointFollower(Node):
         control_rate = self.get_parameter('control_rate').get_parameter_value().double_value
         self.dt = 1.0 / control_rate
 
-        # Waypoints: list of (x, y, z). You can change this or load from a file/parameter.
-        # Make sure they are in the same coordinate frame as your Vicon "Global" translation.
-        self.waypoints: List[Tuple[float, float, float]] = [
-            (2.05, 2.05, 0.0),
-            (-2.05, 2.05, 0.0),
-            (-2.05, 0.5, 0.0),
-            (2.0, 0.5, 0.0),
-
-        ]
+        # Load waypoints from external YAML file specified by the 'waypoints_file' parameter.
+        waypoints_file = self.get_parameter('waypoints_file').get_parameter_value().string_value
+        self.waypoints: List[Tuple[float, float, float]] = self._load_waypoints(waypoints_file)
         self.current_wp_index = 0
 
         # State from Vicon
@@ -132,6 +128,25 @@ class ViconPIDWaypointFollower(Node):
         self.last_time = self.get_clock().now()
 
         self.timer = self.create_timer(self.dt, self.control_loop)
+
+    # ---------- Waypoint Loading ----------
+
+    def _load_waypoints(self, path: str) -> List[Tuple[float, float, float]]:
+        if not path:
+            self.get_logger().fatal('No waypoints_file parameter set. Shutting down.')
+            raise RuntimeError('waypoints_file parameter is required')
+        try:
+            with open(path, 'r') as f:
+                data = yaml.safe_load(f)
+            wps = [(float(w[0]), float(w[1]), float(w[2])) for w in data['waypoints']]
+            self.get_logger().info(f'Loaded {len(wps)} waypoints from {path}')
+            return wps
+        except FileNotFoundError:
+            self.get_logger().fatal(f'Waypoints file not found: {path}')
+            raise
+        except (KeyError, TypeError, IndexError) as e:
+            self.get_logger().fatal(f'Invalid waypoints file format: {e}')
+            raise
 
     # ---------- Callbacks ----------
 

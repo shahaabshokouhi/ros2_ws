@@ -21,6 +21,7 @@ ament_target_dependencies(jetracer
 
 install(TARGETS jetracer DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME}/)
+install(DIRECTORY config DESTINATION share/${PROJECT_NAME}/)
 
 ament_python_install_package(${PROJECT_NAME})
 install(PROGRAMS

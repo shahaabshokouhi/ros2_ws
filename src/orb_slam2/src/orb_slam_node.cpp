@@ -357,6 +357,7 @@ private:
             msg->max_distance,
             msg->is_bad,
             keyframe_ids);
+        pMP->mbHighQaulity = msg->is_high_quality;
 
         auto &agentVec = mImportedPointsByAgent[msg->agent_name];
         agentVec.push_back(pMP);

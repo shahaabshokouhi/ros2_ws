@@ -1,3 +1,5 @@
+import os
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument
@@ -5,6 +7,10 @@ from launch.substitutions import LaunchConfiguration
 
 
 def generate_launch_description():
+    default_waypoints = os.path.join(
+        get_package_share_directory('jetracer'), 'config', 'waypoints.yaml'
+    )
+
     return LaunchDescription([
         # --- Launch arguments ---
         DeclareLaunchArgument(
@@ -19,15 +25,22 @@ def generate_launch_description():
             description='Vicon subject/segment name used in /vicon/<agent>/<agent> topic'
         ),
 
+        DeclareLaunchArgument(
+            'waypoints_file',
+            default_value=default_waypoints,
+            description='Absolute path to a YAML file containing the waypoints list'
+        ),
+
         # --- Vicon PID waypoint follower (replaces joystick teleop) ---
         Node(
-            package='jetracer',          # <<< CHANGE THIS
-            executable='pid_controller.py',  # <<< CHANGE IF NEEDED
+            package='jetracer',
+            executable='pid_controller.py',
             name='pid_controller',
             output='screen',
             parameters=[
                 {'use_sim_time': LaunchConfiguration('use_sim_time')},
                 {'agent_name': LaunchConfiguration('agent_name')},
+                {'waypoints_file': LaunchConfiguration('waypoints_file')},
                 # You can also override gains from here if you want:
                 # {'kp_dist': 1.0},
                 # {'kp_yaw': 2.0},

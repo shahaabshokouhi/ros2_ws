@@ -12,7 +12,10 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', [
             'launch/joy.launch.py',
-            'launch/jetracer_vicon_pid.launch.py',   # <-- add new launch file here
+            'launch/pid_controller.launch.py',
+        ]),
+        ('share/' + package_name + '/config', [
+            'config/waypoints.yaml',
         ]),
     ],
     install_requires=['setuptools'],
