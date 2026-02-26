@@ -227,10 +227,10 @@ private:
             }
 
             if (publish_single_mappoint && !vpHighQualityMapPoints.empty()) {
+                std::cout << "\ndoing single mappoint pub..." << std::endl;
                 // Publish the first valid map point as a single message
                 for (auto* pMP : vpHighQualityMapPoints) {
-                    if (!pMP || pMP->isBad()) continue;
-                    if (pMP->IsSentToOther()) continue;
+                    if (!pMP) continue;
                     
                     single_mappoint_pub_->publish(toMsg(pMP));
                     publishedCount_++;
@@ -306,6 +306,7 @@ private:
             std::memcpy(m.descriptor.data(), d.ptr<uint8_t>(), 32);
         }
         m.is_bad = pMP->isBad();
+        m.is_high_quality = pMP->mbHighQaulity;
         m.stamp = this->get_clock()->now();
 
         const std::map<ORB_SLAM2::KeyFrame*, size_t> obs = pMP->GetObservations();

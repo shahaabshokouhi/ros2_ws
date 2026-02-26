@@ -15,6 +15,7 @@ uint8[32] descriptor
 
 # Status and timing
 bool is_bad
+bool is_high_quality
 builtin_interfaces/Time stamp
 
 # (Optional) Reference keyframe id if you have it
