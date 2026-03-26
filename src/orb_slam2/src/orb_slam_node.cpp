@@ -39,6 +39,7 @@ public:
 
             std::string vocab_file = this->declare_parameter<std::string>("vocab_file");
             std::string settings_file = this->declare_parameter<std::string>("settings_file");
+            output_dir_ = this->declare_parameter<std::string>("output_dir", ".");
             
             agent_name_ = this->get_name();
             const std::string color_topic = std::string("/") + agent_name_ + std::string("/camera/realsense2_camera/color/image_raw");
@@ -387,6 +388,19 @@ private:
     std::unique_ptr<ORB_SLAM2::System> slam_;
     nav_msgs::msg::Path path_msg_;
 
+public:
+    void onShutdown() {
+        if (slam_ && slam_->mpHQmanager) {
+            // Ensure trailing slash
+            std::string dir = output_dir_;
+            if (!dir.empty() && dir.back() != '/') dir += '/';
+            const std::string csv_path = dir + "mappoint_descriptors.csv";
+            slam_->mpHQmanager->ExportMapPointDescriptorsCSV(csv_path);
+        }
+    }
+
+private:
+
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_pub_;
@@ -410,6 +424,7 @@ private:
     bool publish_mappoints = false;
     bool publish_single_mappoint = true;
     std::string agent_name_;
+    std::string output_dir_;
     std::map<std::string, std::vector<ORB_SLAM2::MapPoint*>> mImportedPointsByAgent;
     size_t kBatchSize = 50;
 };
@@ -418,6 +433,9 @@ int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
     auto node = std::make_shared<ORBSLAM2Node>(rclcpp::NodeOptions());
     rclcpp::spin(node);
+    // spin() returns when Ctrl+C is pressed (ROS2 default SIGINT handler calls
+    // rclcpp::shutdown(), which unblocks spin). Export before full teardown.
+    node->onShutdown();
     rclcpp::shutdown();
     return 0;
 }
