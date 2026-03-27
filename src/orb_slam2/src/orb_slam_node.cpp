@@ -390,12 +390,17 @@ private:
 
 public:
     void onShutdown() {
-        if (slam_ && slam_->mpHQmanager) {
-            // Ensure trailing slash
-            std::string dir = output_dir_;
-            if (!dir.empty() && dir.back() != '/') dir += '/';
-            const std::string csv_path = dir + "mappoint_descriptors.csv";
-            slam_->mpHQmanager->ExportMapPointDescriptorsCSV(csv_path);
+        if (slam_) {
+            std::cout << "[ORBSLAM2Node] Shutting down SLAM (waiting for final BA)...\n";
+            slam_->Shutdown();
+            std::cout << "[ORBSLAM2Node] SLAM shutdown complete.\n";
+
+            if (slam_->mpHQmanager) {
+                std::string dir = output_dir_;
+                if (!dir.empty() && dir.back() != '/') dir += '/';
+                const std::string csv_path = dir + "mappoint_descriptors.csv";
+                slam_->mpHQmanager->ExportMapPointDescriptorsCSV(csv_path);
+            }
         }
     }
 
