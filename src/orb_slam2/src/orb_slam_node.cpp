@@ -180,8 +180,10 @@ private:
 
         }
         
-        if (Tcw.empty()) {
-            RCLCPP_WARN(this->get_logger(), "Tracking failed");}
+        if (Tcw.empty() && !trackingFailed) {
+            RCLCPP_WARN(this->get_logger(), "Tracking failed");
+            trackingFailed = true;    
+        }
     
 
         // Create PointCloud2 message
@@ -197,6 +199,7 @@ private:
         mappoints_msg.agent_name = agent_name_;
 
         if (!Tcw.empty()) {
+            trackingFailed = false;
             cv::Mat tcw = Tcw.rowRange(0, 3).col(3);
             cv::Mat Rcw = Tcw.rowRange(0, 3).colRange(0, 3);
             
@@ -240,7 +243,6 @@ private:
             }
 
             if (publish_single_mappoint && !vpHighQualityMapPoints.empty()) {
-                std::cout << "\ndoing single mappoint pub..." << std::endl;
                 // Publish the first valid map point as a single message
                 for (auto* pMP : vpHighQualityMapPoints) {
                     if (!pMP) continue;
@@ -444,6 +446,7 @@ private:
     bool publish_cloud = false;
     bool publish_mappoints = false;
     bool publish_single_mappoint = true;
+    bool trackingFailed = false;
     std::string agent_name_;
     std::string output_dir_;
     std::map<std::string, std::vector<ORB_SLAM2::MapPoint*>> mImportedPointsByAgent;
