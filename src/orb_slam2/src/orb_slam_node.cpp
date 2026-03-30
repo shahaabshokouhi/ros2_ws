@@ -33,17 +33,17 @@
 class ORBSLAM2Node : public rclcpp::Node {
 public:
     ORBSLAM2Node(const rclcpp::NodeOptions &options)
-        : Node("orb_slam2_node", options) 
+        : Node("orb_slam2_node", options)
         {
             RCLCPP_INFO(this->get_logger(), "Node initialized as  '%s'", this->get_name());
 
             std::string vocab_file = this->declare_parameter<std::string>("vocab_file");
             std::string settings_file = this->declare_parameter<std::string>("settings_file");
             output_dir_ = this->declare_parameter<std::string>("output_dir", ".");
-            
+
             agent_name_ = this->get_name();
             const std::string color_topic = std::string("/") + agent_name_ + std::string("/camera/realsense2_camera/color/image_raw");
-            const std::string depth_topic = std::string("/") + agent_name_ + std::string("/camera/realsense2_camera/depth/image_rect_raw");    
+            const std::string depth_topic = std::string("/") + agent_name_ + std::string("/camera/realsense2_camera/depth/image_rect_raw");
 
             slam_ = std::make_unique<ORB_SLAM2::System>(
                 vocab_file,
@@ -74,14 +74,26 @@ public:
                 "orb_slam2/path", 10);
             path_msg_.header.frame_id = "camera_color_optical_frame";
 
-            color_sub_.subscribe(this, color_topic);
-            depth_sub_.subscribe(this, depth_topic);
+            // Separate callback groups so SLAM image processing and map-point
+            // import never block each other on the single-threaded executor path.
+            slam_cb_group_ = this->create_callback_group(
+                rclcpp::CallbackGroupType::MutuallyExclusive);
+            mp_cb_group_ = this->create_callback_group(
+                rclcpp::CallbackGroupType::MutuallyExclusive);
 
+            rclcpp::SubscriptionOptions slam_opts;
+            slam_opts.callback_group = slam_cb_group_;
+            color_sub_.subscribe(this, color_topic, rmw_qos_profile_default, slam_opts);
+            depth_sub_.subscribe(this, depth_topic, rmw_qos_profile_default, slam_opts);
+
+            rclcpp::SubscriptionOptions mp_opts;
+            mp_opts.callback_group = mp_cb_group_;
             using std::placeholders::_1;
             mappoint_sub_ = this->create_subscription<orbslam2_msgs::msg::MapPoint>(
                 "/orb_slam2/single_mappoint", qos,
-                std::bind(&ORBSLAM2Node::importMapPointCallback, this, _1));
-                        
+                std::bind(&ORBSLAM2Node::importMapPointCallback, this, _1),
+                mp_opts);
+
             sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(10), color_sub_, depth_sub_);
             sync_->registerCallback(std::bind(&ORBSLAM2Node::syncCallback, this, std::placeholders::_1, std::placeholders::_2));
 
@@ -432,12 +444,19 @@ private:
     std::string output_dir_;
     std::map<std::string, std::vector<ORB_SLAM2::MapPoint*>> mImportedPointsByAgent;
     size_t kBatchSize = 50;
+
+    rclcpp::CallbackGroup::SharedPtr slam_cb_group_;
+    rclcpp::CallbackGroup::SharedPtr mp_cb_group_;
 };
 
 int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
     auto node = std::make_shared<ORBSLAM2Node>(rclcpp::NodeOptions());
-    rclcpp::spin(node);
+    // Two threads: one for SLAM image processing, one for map-point import.
+    // This prevents the import BoW computation from blocking TrackRGBD.
+    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
+    executor.add_node(node);
+    executor.spin();
     // spin() returns when Ctrl+C is pressed (ROS2 default SIGINT handler calls
     // rclcpp::shutdown(), which unblocks spin). Export before full teardown.
     node->onShutdown();
