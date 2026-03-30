@@ -299,15 +299,19 @@ private:
 
         // position
         const cv::Mat X = pMP->GetWorldPos();
-        m.position.x = static_cast<double>(X.at<float>(0));
-        m.position.y = static_cast<double>(X.at<float>(1));
-        m.position.z = static_cast<double>(X.at<float>(2));
+        if (!X.empty() && X.rows >= 3) {
+            m.position.x = static_cast<double>(X.at<float>(0));
+            m.position.y = static_cast<double>(X.at<float>(1));
+            m.position.z = static_cast<double>(X.at<float>(2));
+        }
 
-        // noraml and distance invariance range
+        // normal and distance invariance range
         const cv::Mat n = pMP->GetNormal();
-        m.normal.x = static_cast<double>(n.at<float>(0));
-        m.normal.y = static_cast<double>(n.at<float>(1));
-        m.normal.z = static_cast<double>(n.at<float>(2));
+        if (!n.empty() && n.rows >= 3) {
+            m.normal.x = static_cast<double>(n.at<float>(0));
+            m.normal.y = static_cast<double>(n.at<float>(1));
+            m.normal.z = static_cast<double>(n.at<float>(2));
+        }
         m.min_distance = pMP->GetMinDistanceInvariance();
         m.max_distance = pMP->GetMaxDistanceInvariance();
 
