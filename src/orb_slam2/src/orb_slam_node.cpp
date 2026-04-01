@@ -26,6 +26,9 @@
 #include <atomic>
 #include <unordered_map>
 #include <mutex>
+#include <queue>
+#include <thread>
+#include <condition_variable>
 
 
 
@@ -74,25 +77,17 @@ public:
                 "orb_slam2/path", 10);
             path_msg_.header.frame_id = "camera_color_optical_frame";
 
-            // Separate callback groups so SLAM image processing and map-point
-            // import never block each other on the single-threaded executor path.
-            slam_cb_group_ = this->create_callback_group(
-                rclcpp::CallbackGroupType::MutuallyExclusive);
-            mp_cb_group_ = this->create_callback_group(
-                rclcpp::CallbackGroupType::MutuallyExclusive);
+            color_sub_.subscribe(this, color_topic);
+            depth_sub_.subscribe(this, depth_topic);
 
-            rclcpp::SubscriptionOptions slam_opts;
-            slam_opts.callback_group = slam_cb_group_;
-            color_sub_.subscribe(this, color_topic, rmw_qos_profile_default, slam_opts);
-            depth_sub_.subscribe(this, depth_topic, rmw_qos_profile_default, slam_opts);
-
-            rclcpp::SubscriptionOptions mp_opts;
-            mp_opts.callback_group = mp_cb_group_;
             using std::placeholders::_1;
             mappoint_sub_ = this->create_subscription<orbslam2_msgs::msg::MapPoint>(
                 "/orb_slam2/single_mappoint", qos,
-                std::bind(&ORBSLAM2Node::importMapPointCallback, this, _1),
-                mp_opts);
+                std::bind(&ORBSLAM2Node::importMapPointCallback, this, _1));
+
+            // Background worker thread: processes ImportHighQualityMapPoints
+            // batches so the ROS callback thread is never blocked.
+            import_worker_ = std::thread(&ORBSLAM2Node::importWorkerLoop, this);
 
             sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(10), color_sub_, depth_sub_);
             sync_->registerCallback(std::bind(&ORBSLAM2Node::syncCallback, this, std::placeholders::_1, std::placeholders::_2));
@@ -382,9 +377,31 @@ private:
         agentVec.push_back(pMP);
 
         if (agentVec.size() >= kBatchSize) {
-            slam_->mpHQmanager->ImportHighQualityMapPoints(msg->agent_name, agentVec);
-            importedCount_ += agentVec.size();  // should be 50 here
-            agentVec.clear();
+            {
+                std::lock_guard<std::mutex> lk(import_queue_mtx_);
+                import_queue_.push({msg->agent_name, std::move(agentVec)});
+            }
+            import_queue_cv_.notify_one();
+            // agentVec was moved; the map entry is now empty (move guarantees this)
+        }
+    }
+
+    void importWorkerLoop() {
+        while (true) {
+            ImportBatch batch;
+            {
+                std::unique_lock<std::mutex> lk(import_queue_mtx_);
+                import_queue_cv_.wait(lk, [this] {
+                    return import_worker_stop_.load() || !import_queue_.empty();
+                });
+                if (import_worker_stop_.load() && import_queue_.empty()) break;
+                batch = std::move(import_queue_.front());
+                import_queue_.pop();
+            }
+            if (slam_ && slam_->mpHQmanager) {
+                slam_->mpHQmanager->ImportHighQualityMapPoints(batch.agent_name, batch.points);
+                importedCount_ += batch.points.size();
+            }
         }
     }
 
@@ -408,6 +425,14 @@ private:
 
 public:
     void onShutdown() {
+        // Stop the background import worker before touching SLAM internals
+        {
+            std::lock_guard<std::mutex> lk(import_queue_mtx_);
+            import_worker_stop_.store(true);
+        }
+        import_queue_cv_.notify_one();
+        if (import_worker_.joinable()) import_worker_.join();
+
         if (slam_) {
             std::cout << "[ORBSLAM2Node] Shutting down SLAM (waiting for final BA)...\n";
             slam_->Shutdown();
@@ -452,20 +477,22 @@ private:
     std::map<std::string, std::vector<ORB_SLAM2::MapPoint*>> mImportedPointsByAgent;
     size_t kBatchSize = 50;
 
-    rclcpp::CallbackGroup::SharedPtr slam_cb_group_;
-    rclcpp::CallbackGroup::SharedPtr mp_cb_group_;
+    // Background worker thread for ImportHighQualityMapPoints
+    struct ImportBatch {
+        std::string agent_name;
+        std::vector<ORB_SLAM2::MapPoint*> points;
+    };
+    std::queue<ImportBatch> import_queue_;
+    std::mutex import_queue_mtx_;
+    std::condition_variable import_queue_cv_;
+    std::atomic<bool> import_worker_stop_{false};
+    std::thread import_worker_;
 };
 
 int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
     auto node = std::make_shared<ORBSLAM2Node>(rclcpp::NodeOptions());
-    // Two threads: one for SLAM image processing, one for map-point import.
-    // This prevents the import BoW computation from blocking TrackRGBD.
-    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
-    executor.add_node(node);
-    executor.spin();
-    // spin() returns when Ctrl+C is pressed (ROS2 default SIGINT handler calls
-    // rclcpp::shutdown(), which unblocks spin). Export before full teardown.
+    rclcpp::spin(node);
     node->onShutdown();
     rclcpp::shutdown();
     return 0;
