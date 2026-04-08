@@ -129,10 +129,10 @@ private:
         std::vector<ORB_SLAM2::MapPoint*> vpHighQualityMapPoints;
         std::vector<float> points;
 
-        // Process color image
+        // Process color image — pass RGB directly; settings have Camera.RGB=1
         try {
             auto cv_ptr = cv_bridge::toCvShare(color_msg, sensor_msgs::image_encodings::RGB8);
-            cv::cvtColor(cv_ptr->image, bgr_image, cv::COLOR_RGB2BGR);
+            bgr_image = cv_ptr->image.clone();
 
         } catch (cv_bridge::Exception& e) {
             RCLCPP_ERROR(this->get_logger(), "cv_bridge exception (color): %s", e.what());
