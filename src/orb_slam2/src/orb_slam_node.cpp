@@ -163,12 +163,16 @@ private:
                 return;
             }
 
-            Tcw = slam_->TrackRGBD(
-            bgr_image,
-            depth_normalized,
-            timestamp);
-
-            vpHighQualityMapPoints = slam_->PopNewHighQualityMapPoints();
+            try {
+                Tcw = slam_->TrackRGBD(bgr_image, depth_normalized, timestamp);
+                vpHighQualityMapPoints = slam_->PopNewHighQualityMapPoints();
+            } catch (const cv::Exception& e) {
+                RCLCPP_ERROR(this->get_logger(), "[TrackRGBD] cv::Exception: %s", e.what());
+                return;
+            } catch (const std::exception& e) {
+                RCLCPP_ERROR(this->get_logger(), "[TrackRGBD] exception: %s", e.what());
+                return;
+            }
             // if (vpHighQualityMapPoints.size()){
             //     std::cout << "Found " << vpHighQualityMapPoints.size() << " new MapPoints to publish" << std::endl;
             //     for (const auto &kv : slam_->mpHQmanager->mImportedPointsByAgent)
@@ -404,8 +408,15 @@ private:
                 import_queue_.pop();
             }
             if (slam_ && slam_->mpHQmanager) {
-                slam_->mpHQmanager->ImportHighQualityMapPoints(batch.agent_name, batch.points);
-                importedCount_ += batch.points.size();
+                try {
+                    slam_->mpHQmanager->ImportHighQualityMapPoints(batch.agent_name, batch.points);
+                    importedCount_ += batch.points.size();
+                } catch (const cv::Exception& e) {
+                    std::cerr << "[importWorker] cv::Exception in ImportHighQualityMapPoints: "
+                              << e.what() << "\n";
+                } catch (const std::exception& e) {
+                    std::cerr << "[importWorker] exception: " << e.what() << "\n";
+                }
             }
         }
     }
