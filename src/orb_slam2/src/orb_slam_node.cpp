@@ -158,6 +158,11 @@ private:
         // Process images with ORB-SLAM2
         if (slam_) {
 
+            if (bgr_image.empty() || depth_normalized.empty()) {
+                RCLCPP_WARN_ONCE(this->get_logger(), "Skipping frame: empty color or depth image");
+                return;
+            }
+
             Tcw = slam_->TrackRGBD(
             bgr_image,
             depth_normalized,
