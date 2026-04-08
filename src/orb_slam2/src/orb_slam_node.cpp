@@ -67,6 +67,8 @@ public:
 
             pointcloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
                 "orb_slam2/pointcloud", 10);
+            hq_pointcloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+                "orb_slam2/hq_pointcloud", 10);
             pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
                 "orb_slam2/pose", 10);
             mappoint_pub_ = this->create_publisher<orbslam2_msgs::msg::MapPointArray>(
@@ -88,6 +90,10 @@ public:
             // Background worker thread: processes ImportHighQualityMapPoints
             // batches so the ROS callback thread is never blocked.
             import_worker_ = std::thread(&ORBSLAM2Node::importWorkerLoop, this);
+
+            hq_cloud_timer_ = this->create_wall_timer(
+                std::chrono::milliseconds(500),
+                std::bind(&ORBSLAM2Node::publishAllHQMapPoints, this));
 
             sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(10), color_sub_, depth_sub_);
             sync_->registerCallback(std::bind(&ORBSLAM2Node::syncCallback, this, std::placeholders::_1, std::placeholders::_2));
@@ -345,6 +351,43 @@ private:
         return m;
     }
 
+    void publishAllHQMapPoints() {
+        if (!slam_) return;
+
+        auto allHQ = slam_->GetHighQualityMapPoints();
+        if (allHQ.empty()) return;
+
+        sensor_msgs::msg::PointCloud2 cloud_msg;
+        cloud_msg.header.stamp = this->get_clock()->now();
+        cloud_msg.header.frame_id = "camera_color_optical_frame";
+        cloud_msg.height = 1;
+        cloud_msg.is_dense = false;
+
+        sensor_msgs::PointCloud2Modifier modifier(cloud_msg);
+        modifier.setPointCloud2FieldsByString(1, "xyz");
+        modifier.resize(allHQ.size());
+
+        sensor_msgs::PointCloud2Iterator<float> iter_x(cloud_msg, "x");
+        sensor_msgs::PointCloud2Iterator<float> iter_y(cloud_msg, "y");
+        sensor_msgs::PointCloud2Iterator<float> iter_z(cloud_msg, "z");
+
+        size_t count = 0;
+        for (auto* pMP : allHQ) {
+            if (!pMP || pMP->isBad()) continue;
+            cv::Mat pos = pMP->GetWorldPos();
+            if (pos.empty()) continue;
+            *iter_x = pos.at<float>(2);
+            *iter_y = -pos.at<float>(0);
+            *iter_z = -pos.at<float>(1);
+            ++iter_x; ++iter_y; ++iter_z;
+            ++count;
+        }
+
+        cloud_msg.width = count;
+        modifier.resize(count);
+        hq_pointcloud_pub_->publish(cloud_msg);
+    }
+
     void importMapPointCallback(const orbslam2_msgs::msg::MapPoint::SharedPtr msg)
     {
 
@@ -468,6 +511,8 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr hq_pointcloud_pub_;
+    rclcpp::TimerBase::SharedPtr hq_cloud_timer_;
     rclcpp::Publisher<orbslam2_msgs::msg::MapPointArray>::SharedPtr mappoint_pub_;
     rclcpp::Publisher<orbslam2_msgs::msg::MapPoint>::SharedPtr single_mappoint_pub_;
 
