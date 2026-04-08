@@ -132,7 +132,7 @@ private:
         // Process color image
         try {
             auto cv_ptr = cv_bridge::toCvShare(color_msg, sensor_msgs::image_encodings::RGB8);
-            cv::cvtColor(cv_ptr->image, bgr_image, cv::COLOR_RGB2BGR);
+            cv::cvtColor(cv_ptr->image, bgr_image, cv::COLOR_RGB2BGR); // kir
 
         } catch (cv_bridge::Exception& e) {
             RCLCPP_ERROR(this->get_logger(), "cv_bridge exception (color): %s", e.what());
