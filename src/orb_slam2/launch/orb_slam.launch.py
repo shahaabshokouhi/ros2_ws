@@ -5,6 +5,10 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     return LaunchDescription([
+        # Give the SLAM node enough time to finish bundle adjustment and CSV export
+        # before being force-killed. Override on CLI: ros2 launch ... sigterm_timeout:=600
+        DeclareLaunchArgument('sigterm_timeout', default_value='300'),
+        DeclareLaunchArgument('sigkill_timeout', default_value='60'),
         DeclareLaunchArgument(
             'agent',
             default_value='agent_0',
