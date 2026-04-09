@@ -37,8 +37,11 @@ def launch_nodes(context):
         return f"/{agent}/{suffix.lstrip('/')}"
 
     rs_remaps = [
-        ('/camera/realsense2_camera/color/image_raw',      tgt('camera/realsense2_camera/color/image_raw')),
-        ('/camera/realsense2_camera/depth/image_rect_raw', tgt('camera/realsense2_camera/depth/image_rect_raw')),
+        ('/camera/realsense2_camera/color/image_raw',
+         tgt('camera/realsense2_camera/color/image_raw')),
+        # Use the depth-to-color aligned topic, not the raw unaligned depth
+        ('/camera/realsense2_camera/aligned_depth_to_color/image_raw',
+         tgt('camera/realsense2_camera/depth/image_rect_raw')),
     ]
 
     realsense_node = Node(
@@ -51,7 +54,13 @@ def launch_nodes(context):
             'enable_infra1': True,
             'enable_infra2': True,
             'enable_color': True,
-            'align_depth': True,
+            'align_depth.enable': True,  # correct param name; creates aligned_depth_to_color topic
+            'color_width':  640,
+            'color_height': 480,
+            'depth_width':  640,
+            'depth_height': 480,
+            'color_fps': 30.0,
+            'depth_fps': 30.0,
         }],
         remappings=rs_remaps,
     )
