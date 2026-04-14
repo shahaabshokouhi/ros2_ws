@@ -69,6 +69,8 @@ public:
                 "orb_slam2/pointcloud", 10);
             hq_pointcloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
                 "orb_slam2/hq_pointcloud", 10);
+            merged_map_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+                "orb_slam2/merged_map", 10);
             pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
                 "orb_slam2/pose", 10);
             mappoint_pub_ = this->create_publisher<orbslam2_msgs::msg::MapPointArray>(
@@ -91,9 +93,12 @@ public:
             // batches so the ROS callback thread is never blocked.
             import_worker_ = std::thread(&ORBSLAM2Node::importWorkerLoop, this);
 
-            hq_cloud_timer_ = this->create_wall_timer(
+            // hq_cloud_timer_ = this->create_wall_timer(
+            //     std::chrono::milliseconds(500),
+            //     std::bind(&ORBSLAM2Node::publishAllHQMapPoints, this));
+            merged_map_timer_ = this->create_wall_timer(
                 std::chrono::milliseconds(500),
-                std::bind(&ORBSLAM2Node::publishAllHQMapPoints, this));
+                std::bind(&ORBSLAM2Node::publishMergedMap, this));
 
             sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(10), color_sub_, depth_sub_);
             sync_->registerCallback(std::bind(&ORBSLAM2Node::syncCallback, this, std::placeholders::_1, std::placeholders::_2));
@@ -232,9 +237,9 @@ private:
             pose_msg.header.stamp = color_msg->header.stamp;
             path_msg_.header.stamp = color_msg->header.stamp;
             pose_msg.header.frame_id = "camera_frame";
-            pose_msg.pose.position.x = twc.at<float>(2);
-            pose_msg.pose.position.y = -twc.at<float>(0);
-            pose_msg.pose.position.z = -twc.at<float>(1);
+            pose_msg.pose.position.x = twc.at<float>(0);
+            pose_msg.pose.position.y = twc.at<float>(1);
+            pose_msg.pose.position.z = twc.at<float>(2);
             pose_msg.pose.orientation.x = -tf_quat.z();
             pose_msg.pose.orientation.y = tf_quat.x();
             pose_msg.pose.orientation.z = -tf_quat.y();
@@ -261,39 +266,6 @@ private:
                     publishedCount_++;
                     pMP->SentToOther(true);
                 }
-            }
-
-            // point cloud message
-            if (publish_cloud){
-
-                for (ORB_SLAM2::MapPoint* pMP : vpHighQualityMapPoints){
-                    if (!pMP || pMP->isBad()) continue;
-                    cv::Mat pos = pMP->GetWorldPos();
-
-                    points.push_back(pos.at<float>(2));
-                    points.push_back(-pos.at<float>(0));
-                    points.push_back(-pos.at<float>(1));
-                }
-
-                cloud_msg.width = points.size() / 3;
-                cloud_msg.is_dense = false;
-
-                sensor_msgs::PointCloud2Modifier modifier(cloud_msg);
-                modifier.setPointCloud2FieldsByString(1, "xyz");
-                modifier.resize(cloud_msg.width);
-
-                sensor_msgs::PointCloud2Iterator<float> iter_x(cloud_msg, "x");
-                sensor_msgs::PointCloud2Iterator<float> iter_y(cloud_msg, "y");
-                sensor_msgs::PointCloud2Iterator<float> iter_z(cloud_msg, "z");
-
-                for (size_t i = 0; i < points.size(); i += 3) {
-                    *iter_x = points[i];
-                    *iter_y = points[i + 1];
-                    *iter_z = points[i + 2];
-                    ++iter_x; ++iter_y; ++iter_z;
-                }
-
-                pointcloud_pub_->publish(cloud_msg);
             }
             
         }
@@ -376,9 +348,9 @@ private:
             if (!pMP || pMP->isBad()) continue;
             cv::Mat pos = pMP->GetWorldPos();
             if (pos.empty()) continue;
-            *iter_x = pos.at<float>(2);
-            *iter_y = -pos.at<float>(0);
-            *iter_z = -pos.at<float>(1);
+            *iter_x = pos.at<float>(0);
+            *iter_y = pos.at<float>(1);
+            *iter_z = pos.at<float>(2);
             ++iter_x; ++iter_y; ++iter_z;
             ++count;
         }
@@ -386,6 +358,35 @@ private:
         cloud_msg.width = count;
         modifier.resize(count);
         hq_pointcloud_pub_->publish(cloud_msg);
+    }
+
+    void publishMergedMap() {
+        if (!slam_ || !slam_->mpHQmanager) return;
+
+        std::vector<cv::Point3f> pts = slam_->mpHQmanager->ExportMergedMap();
+        if (pts.empty()) return;
+
+        sensor_msgs::msg::PointCloud2 cloud_msg;
+        cloud_msg.header.stamp = this->get_clock()->now();
+        cloud_msg.header.frame_id = "camera_color_optical_frame";
+        cloud_msg.height = 1;
+        cloud_msg.is_dense = false;
+
+        sensor_msgs::PointCloud2Modifier modifier(cloud_msg);
+        modifier.setPointCloud2FieldsByString(1, "xyz");
+        modifier.resize(pts.size());
+
+        sensor_msgs::PointCloud2Iterator<float> iter_x(cloud_msg, "x");
+        sensor_msgs::PointCloud2Iterator<float> iter_y(cloud_msg, "y");
+        sensor_msgs::PointCloud2Iterator<float> iter_z(cloud_msg, "z");
+
+        for (const auto& p : pts) {
+            *iter_x = p.x; *iter_y = p.y; *iter_z = p.z;
+            ++iter_x; ++iter_y; ++iter_z;
+        }
+
+        cloud_msg.width = static_cast<uint32_t>(pts.size());
+        merged_map_pub_->publish(cloud_msg);
     }
 
     void importMapPointCallback(const orbslam2_msgs::msg::MapPoint::SharedPtr msg)
@@ -512,7 +513,9 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr hq_pointcloud_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr merged_map_pub_;
     rclcpp::TimerBase::SharedPtr hq_cloud_timer_;
+    rclcpp::TimerBase::SharedPtr merged_map_timer_;
     rclcpp::Publisher<orbslam2_msgs::msg::MapPointArray>::SharedPtr mappoint_pub_;
     rclcpp::Publisher<orbslam2_msgs::msg::MapPoint>::SharedPtr single_mappoint_pub_;
 
