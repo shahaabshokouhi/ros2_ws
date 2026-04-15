@@ -12,6 +12,12 @@ def generate_launch_description():
             description='Use simulation time if true'
         ),
 
+        DeclareLaunchArgument(
+            'agent_name',
+            default_value='agent_0',
+            description='agent name used to remap topics to prevent topic interference in MA systems'
+        ),
+
         # Joystick Node
         Node(
             package='joy',
@@ -43,7 +49,8 @@ def generate_launch_description():
             parameters = [
                 {'use_sim_time': False},
                 {'port_name': '/dev/ttyACM0'},
-                {'publish_odom_transform': False}
+                {'publish_odom_transform': False},
+                {'agent_name': LaunchConfiguration('agent_name')},
             ],
             remappings = [
             	('/odom', '/odom_raw')

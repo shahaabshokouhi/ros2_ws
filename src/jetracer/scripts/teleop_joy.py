@@ -9,6 +9,7 @@ class Teleop(Node):
     def __init__(self):
         super().__init__('teleop_joy')
 
+        self.declare_parameter('agent_name', 'agent_0')
         self.declare_parameter('x_speed', 0.3)
         self.declare_parameter('y_speed', 0.0)  # not used
         self.declare_parameter('w_speed', 1.0)
@@ -17,15 +18,19 @@ class Teleop(Node):
         self.x_speed = self.get_parameter('x_speed').value
         self.w_speed = self.get_parameter('w_speed').value
         hz = self.get_parameter('hz').value
+        agent_name = self.get_parameter('agent_name').get_parameter_value().string_value
 
         self.active = 0
         self.cmd = Twist()
 
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.subscription = self.create_subscription(Joy, 'joy', self.joy_callback, 10)
+        self.cmd_pub = self.create_publisher(Twist, agent_name + '/cmd_vel', 10)
+        self.subscription = self.create_subscription(Joy, '/joy', self.joy_callback, 10)
         self.timer = self.create_timer(1.0 / hz, self.publish_cmd)
+        self.get_logger().info('Joystick initiallized ...')
+
 
     def joy_callback(self, data):
+        
         if data.buttons[6] == 1:
             self.cmd.linear.x = self.x_speed * data.axes[3]
             self.cmd.angular.z = self.w_speed * data.axes[0]
