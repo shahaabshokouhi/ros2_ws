@@ -97,7 +97,7 @@ public:
             //     std::chrono::milliseconds(500),
             //     std::bind(&ORBSLAM2Node::publishAllHQMapPoints, this));
             merged_map_timer_ = this->create_wall_timer(
-                std::chrono::milliseconds(500),
+                std::chrono::milliseconds(2000),
                 std::bind(&ORBSLAM2Node::publishMergedMap, this));
 
             sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(10), color_sub_, depth_sub_);
