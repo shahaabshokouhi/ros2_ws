@@ -95,6 +95,19 @@ def generate_launch_description():
             ],
         ),
         
+        # OLED display node — shows IP address and system stats on the bot's screen
+        Node(
+            package='jetracer',
+            executable='display_node.py',
+            name='display_node',
+            output='screen',
+            parameters=[
+                {'agent_name': LaunchConfiguration('agent_name')},
+                {'update_rate': 2.0},
+                {'i2c_bus': 1},
+            ]
+        ),
+
         Node(
             package = 'tf2_ros',
             executable = 'static_transform_publisher',

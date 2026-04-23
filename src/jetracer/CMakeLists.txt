@@ -34,4 +34,9 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
 )
 
+install(PROGRAMS
+  scripts/display_node.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()
