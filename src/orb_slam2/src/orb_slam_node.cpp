@@ -79,7 +79,7 @@ public:
                 "orb_slam2/single_mappoint", qos);
             path_pub_ = this->create_publisher<nav_msgs::msg::Path>(
                 agent_name_ + "/orb_slam2/path", 10);
-            path_msg_.header.frame_id = agent_name_ + "camera_color_optical_frame";
+            path_msg_.header.frame_id = "camera_color_optical_frame";
 
             color_sub_.subscribe(this, color_topic);
             depth_sub_.subscribe(this, depth_topic);
