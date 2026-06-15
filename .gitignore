@@ -3,8 +3,6 @@ install/
 log/
 
 clean_build.sh
-run_controller.sh
-run_slam.sh
 
 __pycache__/
 *.py[cod]

@@ -39,6 +39,8 @@ def launch_nodes(context):
     rs_remaps = [
         ('/camera/realsense2_camera/color/image_raw',
          tgt('camera/realsense2_camera/color/image_raw')),
+        ('/camera/realsense2_camera/color/camera_info',
+         tgt('camera/realsense2_camera/color/camera_info')),
         # Use the depth-to-color aligned topic, not the raw unaligned depth
         ('/camera/realsense2_camera/aligned_depth_to_color/image_raw',
          tgt('camera/realsense2_camera/depth/image_rect_raw')),
@@ -61,6 +63,7 @@ def launch_nodes(context):
             'depth_height': 480,
             'color_fps': 30.0,
             'depth_fps': 30.0,
+            'publish_tf': False,
         }],
         remappings=rs_remaps,
     )

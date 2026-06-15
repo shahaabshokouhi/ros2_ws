@@ -5,6 +5,8 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Matrix3x3.h>
+#include <tf2_ros/transform_broadcaster.h>
+#include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <cv_bridge/cv_bridge.h>
 #include <image_transport/image_transport.hpp>
@@ -63,6 +65,8 @@ public:
             cx_ = fsettings["Camera.cx"];
             cy_ = fsettings["Camera.cy"];
 
+            tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+
             auto qos = rclcpp::QoS(rclcpp::KeepLast(5000)).reliable().durability_volatile();
 
             pointcloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
@@ -79,7 +83,9 @@ public:
                 "orb_slam2/single_mappoint", qos);
             path_pub_ = this->create_publisher<nav_msgs::msg::Path>(
                 agent_name_ + "/orb_slam2/path", 10);
-            path_msg_.header.frame_id = "camera_color_optical_frame";
+            image_plane_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+                agent_name_ + "/orb_slam2/image_plane", 10);
+            path_msg_.header.frame_id = "map";
 
             color_sub_.subscribe(this, color_topic);
             depth_sub_.subscribe(this, depth_topic);
@@ -229,24 +235,89 @@ private:
                 Rwc.at<float>(0, 0), Rwc.at<float>(0, 1), Rwc.at<float>(0, 2),
                 Rwc.at<float>(1, 0), Rwc.at<float>(1, 1), Rwc.at<float>(1, 2),
                 Rwc.at<float>(2, 0), Rwc.at<float>(2, 1), Rwc.at<float>(2, 2));
-            
-            tf2::Quaternion tf_quat;
-            tf_rot.getRotation(tf_quat);
+
+            // Convert from ORB-SLAM2 world frame (Z-forward, X-right, Y-down)
+            // to ROS map frame (X-forward, Y-left, Z-up).
+            // Axis mapping: x_ros = z_orb, y_ros = -x_orb, z_ros = -y_orb
+            tf2::Matrix3x3 R_orb_to_ros(
+                 0,  0,  1,
+                -1,  0,  0,
+                 0, -1,  0);
+            tf2::Matrix3x3 R_map_cam = R_orb_to_ros * tf_rot;
+            tf2::Quaternion q_map_cam;
+            R_map_cam.getRotation(q_map_cam);
+
+            const float tx =  twc.at<float>(2);
+            const float ty = -twc.at<float>(0);
+            const float tz = -twc.at<float>(1);
 
             geometry_msgs::msg::PoseStamped pose_msg;
             pose_msg.header.stamp = color_msg->header.stamp;
             path_msg_.header.stamp = color_msg->header.stamp;
-            pose_msg.header.frame_id = "camera_frame";
-            pose_msg.pose.position.x = twc.at<float>(0);
-            pose_msg.pose.position.y = twc.at<float>(1);
-            pose_msg.pose.position.z = twc.at<float>(2);
-            pose_msg.pose.orientation.x = -tf_quat.z();
-            pose_msg.pose.orientation.y = tf_quat.x();
-            pose_msg.pose.orientation.z = -tf_quat.y();
-            pose_msg.pose.orientation.w = tf_quat.w();
+            pose_msg.header.frame_id = "map";
+            pose_msg.pose.position.x = tx;
+            pose_msg.pose.position.y = ty;
+            pose_msg.pose.position.z = tz;
+            pose_msg.pose.orientation.x = q_map_cam.x();
+            pose_msg.pose.orientation.y = q_map_cam.y();
+            pose_msg.pose.orientation.z = q_map_cam.z();
+            pose_msg.pose.orientation.w = q_map_cam.w();
 
             path_msg_.poses.push_back(pose_msg);
             pose_pub_->publish(pose_msg);
+
+            geometry_msgs::msg::TransformStamped tf_stamped;
+            tf_stamped.header.stamp = color_msg->header.stamp;
+            tf_stamped.header.frame_id = "map";
+            tf_stamped.child_frame_id = "camera_color_optical_frame";
+            tf_stamped.transform.translation.x = tx;
+            tf_stamped.transform.translation.y = ty;
+            tf_stamped.transform.translation.z = tz;
+            tf_stamped.transform.rotation.x = q_map_cam.x();
+            tf_stamped.transform.rotation.y = q_map_cam.y();
+            tf_stamped.transform.rotation.z = q_map_cam.z();
+            tf_stamped.transform.rotation.w = q_map_cam.w();
+            tf_broadcaster_->sendTransform(tf_stamped);
+
+            // Project image pixels to 3D in camera frame → floating image plane in RViz
+            if (!bgr_image.empty() && image_plane_pub_->get_subscription_count() > 0) {
+                constexpr int STEP = 8;          // sample every Nth pixel
+                constexpr float PLANE_DEPTH = 0.5f; // meters in front of camera
+                const int rows = bgr_image.rows;
+                const int cols = bgr_image.cols;
+
+                sensor_msgs::msg::PointCloud2 plane_msg;
+                plane_msg.header.stamp = color_msg->header.stamp;
+                plane_msg.header.frame_id = "camera_color_optical_frame";
+                plane_msg.height = 1;
+                plane_msg.is_dense = true;
+
+                sensor_msgs::PointCloud2Modifier mod(plane_msg);
+                mod.setPointCloud2FieldsByString(2, "xyz", "rgb");
+                mod.resize(((rows + STEP - 1) / STEP) * ((cols + STEP - 1) / STEP));
+
+                sensor_msgs::PointCloud2Iterator<float>   it_x(plane_msg, "x");
+                sensor_msgs::PointCloud2Iterator<float>   it_y(plane_msg, "y");
+                sensor_msgs::PointCloud2Iterator<float>   it_z(plane_msg, "z");
+                sensor_msgs::PointCloud2Iterator<float>   it_rgb(plane_msg, "rgb");
+
+                size_t count = 0;
+                for (int v = 0; v < rows; v += STEP) {
+                    for (int u = 0; u < cols; u += STEP) {
+                        *it_x = (u - cx_) / fx_ * PLANE_DEPTH;
+                        *it_y = (v - cy_) / fy_ * PLANE_DEPTH;
+                        *it_z = PLANE_DEPTH;
+                        const cv::Vec3b& px = bgr_image.at<cv::Vec3b>(v, u);
+                        uint32_t rgb = ((uint32_t)px[2] << 16) | ((uint32_t)px[1] << 8) | (uint32_t)px[0];
+                        std::memcpy(&(*it_rgb), &rgb, sizeof(float));
+                        ++it_x; ++it_y; ++it_z; ++it_rgb;
+                        ++count;
+                    }
+                }
+                plane_msg.width = static_cast<uint32_t>(count);
+                mod.resize(count);
+                image_plane_pub_->publish(plane_msg);
+            }
 
             if (publish_mappoints) {
                 mappoints_msg.points.reserve(vpHighQualityMapPoints.size());
@@ -331,7 +402,7 @@ private:
 
         sensor_msgs::msg::PointCloud2 cloud_msg;
         cloud_msg.header.stamp = this->get_clock()->now();
-        cloud_msg.header.frame_id = "camera_color_optical_frame";
+        cloud_msg.header.frame_id = "map";
         cloud_msg.height = 1;
         cloud_msg.is_dense = false;
 
@@ -348,9 +419,9 @@ private:
             if (!pMP || pMP->isBad()) continue;
             cv::Mat pos = pMP->GetWorldPos();
             if (pos.empty()) continue;
-            *iter_x = pos.at<float>(0);
-            *iter_y = pos.at<float>(1);
-            *iter_z = pos.at<float>(2);
+            *iter_x =  pos.at<float>(2);
+            *iter_y = -pos.at<float>(0);
+            *iter_z = -pos.at<float>(1);
             ++iter_x; ++iter_y; ++iter_z;
             ++count;
         }
@@ -368,7 +439,7 @@ private:
 
         sensor_msgs::msg::PointCloud2 cloud_msg;
         cloud_msg.header.stamp = this->get_clock()->now();
-        cloud_msg.header.frame_id = "camera_color_optical_frame";
+        cloud_msg.header.frame_id = "map";
         cloud_msg.height = 1;
         cloud_msg.is_dense = false;
 
@@ -381,7 +452,7 @@ private:
         sensor_msgs::PointCloud2Iterator<float> iter_z(cloud_msg, "z");
 
         for (const auto& p : pts) {
-            *iter_x = p.x; *iter_y = p.y; *iter_z = p.z;
+            *iter_x =  p.z; *iter_y = -p.x; *iter_z = -p.y;
             ++iter_x; ++iter_y; ++iter_z;
         }
 
@@ -509,6 +580,8 @@ public:
 
 private:
 
+    std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr image_plane_pub_;
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_pub_;
