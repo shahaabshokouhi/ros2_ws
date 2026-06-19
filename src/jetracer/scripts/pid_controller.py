@@ -81,6 +81,7 @@ class ViconPIDWaypointFollower(Node):
         self.declare_parameter('kp_yaw', 0.5)
         self.declare_parameter('kd_yaw', 0.0)
         self.declare_parameter('waypoints_file', '')
+        self.declare_parameter('goal_subscriber', 'false')
 
         agent_name = self.get_parameter('agent_name').get_parameter_value().string_value
 
@@ -100,9 +101,20 @@ class ViconPIDWaypointFollower(Node):
         self.dt = 1.0 / control_rate
 
         # Load waypoints from external YAML file specified by the 'waypoints_file' parameter.
-        waypoints_file = self.get_parameter('waypoints_file').get_parameter_value().string_value
-        self.waypoints: List[Tuple[float, float, float]] = self._load_waypoints(waypoints_file)
-        self.current_wp_index = 0
+        self.haveGoal = False
+        self.subToGoal = self.get_parameter('goal_subscriber').value
+        if not self.subToGoal:
+            waypoints_file = self.get_parameter('waypoints_file').get_parameter_value().string_value
+            self.waypoints: List[Tuple[float, float, float]] = self._load_waypoints(waypoints_file)
+            self.current_wp_index = 0
+
+
+        self.subscription = self.create_subscription(
+            PoseStamped,
+            '/' + agent_name + '/goal_pose',
+            self.set_goal,
+            10
+        )
 
         # State from Vicon
         self.have_pose = False
@@ -129,6 +141,11 @@ class ViconPIDWaypointFollower(Node):
 
         self.timer = self.create_timer(self.dt, self.control_loop)
 
+    def set_goal(self, msg: PoseStamped):
+        x = msg.pose.position.x
+        y = msg.pose.position.y   
+        self.goal = (x, y, 0)
+        self.haveGoal = True
     # ---------- Waypoint Loading ----------
 
     def _load_waypoints(self, path: str) -> List[Tuple[float, float, float]]:
@@ -191,6 +208,7 @@ class ViconPIDWaypointFollower(Node):
     def control_loop(self):
         now = self.get_clock().now()
         dt = (now - self.last_time).nanoseconds * 1e-9
+        target = tuple()
 
         if dt <= 0.0:
             dt = self.dt
@@ -200,15 +218,22 @@ class ViconPIDWaypointFollower(Node):
             self.get_logger().info("No feedback, waiting")
             # No feedback yet
             return
-
-        if self.current_wp_index >= len(self.waypoints):
-            self.get_logger().info("Finished all waypoints")
-            # Finished all waypoints: stop
-            cmd = Twist()
-            self.cmd_pub.publish(cmd)
-            return
-
-        target = self.waypoints[self.current_wp_index]
+        
+        if self.subToGoal:
+            if self.haveGoal:
+                target = self.goal
+            else:
+                self.get_logger().info("No goal received yet")
+                return
+        else:
+            if self.current_wp_index >= len(self.waypoints):
+                self.get_logger().info("Finished all waypoints")
+                # Finished all waypoints: stop
+                cmd = Twist()
+                self.cmd_pub.publish(cmd)
+                return
+            target = self.waypoints[self.current_wp_index]
+       
         tx, ty, tz = target
 
         # Position errors in world frame
@@ -223,29 +248,38 @@ class ViconPIDWaypointFollower(Node):
         # self.get_logger().info(f'Dist error: {dist_error}')
         # Check if we reached current waypoint
         if dist_error < pos_tolerance:
-            self.get_logger().info(
-                f'Reached waypoint {self.current_wp_index}: ({tx:.2f}, {ty:.2f}, {tz:.2f})'
-            )
-            self.current_wp_index += 1
+            if self.subToGoal:
+                self.get_logger().info(
+                    'Reached the goal, set a new one'
+                )
+                cmd = Twist()
+                self.cmd_pub.publish(cmd)
+                return
 
-            # Reset PIDs when switching waypoints
-            self.pid_dist.reset()
-            self.pid_yaw.reset()
-
-            # Stop if finished
-            if self.current_wp_index >= len(self.waypoints):
-                self.current_wp_index = 0
-                # cmd = Twist()
-                # self.cmd_pub.publish(cmd)
-                # self.get_logger().info('All waypoints completed.')
-                # return
             else:
-                # Use new target for control this cycle
-                target = self.waypoints[self.current_wp_index]
-                tx, ty, tz = target
-                ex = tx - self.x
-                ey = ty - self.y
-                dist_error = math.hypot(ex, ey)
+                self.get_logger().info(
+                    f'Reached waypoint: ({tx:.2f}, {ty:.2f}, {tz:.2f})'
+                )
+                self.current_wp_index += 1
+
+                # Reset PIDs when switching waypoints
+                self.pid_dist.reset()
+                self.pid_yaw.reset()
+
+                # Stop if finished
+                if self.current_wp_index >= len(self.waypoints):
+                    self.current_wp_index = 0
+                    # cmd = Twist()
+                    # self.cmd_pub.publish(cmd)
+                    # self.get_logger().info('All waypoints completed.')
+                    # return
+                else:
+                    # Use new target for control this cycle
+                    target = self.waypoints[self.current_wp_index]
+                    tx, ty, tz = target
+                    ex = tx - self.x
+                    ey = ty - self.y
+                    dist_error = math.hypot(ex, ey)
 
         # Desired heading towards waypoint
         desired_yaw = math.atan2(ey, ex)

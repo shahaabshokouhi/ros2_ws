@@ -31,6 +31,12 @@ def generate_launch_description():
             description='Absolute path to a YAML file containing the waypoints list'
         ),
 
+        DeclareLaunchArgument(
+            'goal_subscriber',
+            default_value='false',
+            description='Use published goal as the next waypoint'
+        ),
+
         # --- Vicon PID waypoint follower (replaces joystick teleop) ---
         Node(
             package='jetracer',
