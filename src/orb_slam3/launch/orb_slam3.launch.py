@@ -57,12 +57,19 @@ def launch_nodes(context):
             'enable_infra2': True,
             'enable_color': True,
             'align_depth.enable': True,  # creates aligned_depth_to_color topic
+            # Old param names (honored by older realsense2_camera drivers, as
+            # on the robots):
             'color_width':  640,
             'color_height': 480,
             'depth_width':  640,
             'depth_height': 480,
             'color_fps': 30.0,
             'depth_fps': 30.0,
+            # New param names (realsense2_camera >= 4.5x IGNORES the ones
+            # above and streams its default 1280x720 profile otherwise —
+            # which silently breaks SLAM calibrated for 640x480):
+            'rgb_camera.color_profile': '640x480x30',
+            'depth_module.depth_profile': '640x480x30',
             'publish_tf': False,
         }],
         remappings=rs_remaps,

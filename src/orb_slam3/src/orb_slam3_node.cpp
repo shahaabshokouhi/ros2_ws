@@ -76,6 +76,8 @@ public:
             fy_ = readIntrinsic(fsettings, "Camera1.fy", "Camera.fy");
             cx_ = readIntrinsic(fsettings, "Camera1.cx", "Camera.cx");
             cy_ = readIntrinsic(fsettings, "Camera1.cy", "Camera.cy");
+            expected_width_  = (int)fsettings["Camera.width"];
+            expected_height_ = (int)fsettings["Camera.height"];
 
             tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
@@ -132,6 +134,33 @@ private:
     void syncCallback(const sensor_msgs::msg::Image::ConstSharedPtr& color_msg,
                      const sensor_msgs::msg::Image::ConstSharedPtr& depth_msg) {
 
+        // ── Sync diagnostics: processed-pair rate, color↔depth timestamp skew,
+        // and pipeline latency (how stale the frame is when we process it).
+        {
+            const double tc = rclcpp::Time(color_msg->header.stamp).seconds();
+            const double td = rclcpp::Time(depth_msg->header.stamp).seconds();
+            const double now = this->get_clock()->now().seconds();
+            diag_cnt_++;
+            const double skew_ms = std::fabs(tc - td) * 1000.0;
+            diag_skew_acc_ += skew_ms;
+            diag_skew_max_ = std::max(diag_skew_max_, skew_ms);
+            const double lat_ms = (now - tc) * 1000.0;
+            diag_lat_acc_ += lat_ms;
+            diag_lat_max_ = std::max(diag_lat_max_, lat_ms);
+            if (diag_last_print_ == 0.0) diag_last_print_ = now;
+            if (now - diag_last_print_ >= 15.0) {
+                RCLCPP_INFO(this->get_logger(),
+                    "[SyncDiag] pairs=%.1f Hz | color-depth skew avg=%.1f max=%.1f ms | latency avg=%.0f max=%.0f ms",
+                    diag_cnt_ / (now - diag_last_print_),
+                    diag_skew_acc_ / diag_cnt_, diag_skew_max_,
+                    diag_lat_acc_ / diag_cnt_, diag_lat_max_);
+                diag_last_print_ = now;
+                diag_cnt_ = 0;
+                diag_skew_acc_ = diag_skew_max_ = 0.0;
+                diag_lat_acc_ = diag_lat_max_ = 0.0;
+            }
+        }
+
         cv::Mat depth_normalized;
         cv::Mat bgr_image;
         std::vector<ORB_SLAM3::MapPoint*> vpHighQualityMapPoints;
@@ -165,6 +194,27 @@ private:
 
             if (bgr_image.empty() || depth_normalized.empty()) {
                 RCLCPP_WARN_ONCE(this->get_logger(), "Skipping frame: empty color or depth image");
+                return;
+            }
+
+            // The camera MUST stream the resolution the calibration was made
+            // for. Newer realsense2_camera drivers ignore the old
+            // color_width/height params and silently stream 1280x720, which
+            // corrupts all SLAM geometry (wrong fx/cx for every unprojection).
+            if (expected_width_ > 0 &&
+                (bgr_image.cols != expected_width_ || bgr_image.rows != expected_height_)) {
+                RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                    "Image resolution %dx%d does NOT match settings %dx%d — SLAM geometry "
+                    "will be wrong! Fix the camera profile (rgb_camera.color_profile) "
+                    "in the launch file. Dropping frames.",
+                    bgr_image.cols, bgr_image.rows, expected_width_, expected_height_);
+                return;
+            }
+            if (depth_normalized.cols != bgr_image.cols || depth_normalized.rows != bgr_image.rows) {
+                RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                    "Depth resolution %dx%d does not match color %dx%d — is the aligned "
+                    "depth topic being remapped correctly? Dropping frames.",
+                    depth_normalized.cols, depth_normalized.rows, bgr_image.cols, bgr_image.rows);
                 return;
             }
 
@@ -460,6 +510,12 @@ private:
     std::atomic<uint64_t> receivedCount_{0};
     std::atomic<uint64_t> importedCount_{0};
 
+    // Sync diagnostics (only touched from the sync callback thread)
+    double diag_last_print_ = 0.0;
+    int diag_cnt_ = 0;
+    double diag_skew_acc_ = 0.0, diag_skew_max_ = 0.0;
+    double diag_lat_acc_ = 0.0, diag_lat_max_ = 0.0;
+
     std::unique_ptr<ORB_SLAM3::System> slam_;
     nav_msgs::msg::Path path_msg_;
 
@@ -512,6 +568,8 @@ private:
     float fy_ = 0.0f;
     float cx_ = 0.0f;
     float cy_ = 0.0f;
+    int expected_width_ = 0;
+    int expected_height_ = 0;
     bool publish_mappoints = false;
     bool publish_single_mappoint = true;
     bool trackingFailed = false;
