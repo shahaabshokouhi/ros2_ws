@@ -7,10 +7,9 @@
 # ORB-SLAM2). Override with REALSENSE_CONFIG_ORBSLAM3 if needed.
 
 
-SETTINGS="${REALSENSE_CONFIG_ORBSLAM3:-${ORB_SLAM3_ROOT}/Examples/RGB-D/realsense.yaml}"
 
-if [ ! -f "$SETTINGS" ]; then
-    echo "Error: ORB-SLAM3 settings file not found: $SETTINGS"
+if [ ! -f "$REALSENSE3_CONFIG" ]; then
+    echo "Error: ORB-SLAM3 settings file not found: $REALSENSE3_CONFIG"
     exit 1
 fi
 if [ -z "$AGENT_NAME" ]; then
@@ -23,4 +22,4 @@ source install/setup.bash
 ros2 launch orb_slam3 orb_slam3.launch.py \
     agent:="$AGENT_NAME" \
     vocab_file:=${ORB_SLAM3_ROOT}/Vocabulary/ORBvoc.txt \
-    settings_file:="$SETTINGS"
+    settings_file:="$REALSENSE3_CONFIG"
