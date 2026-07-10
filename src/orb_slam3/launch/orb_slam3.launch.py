@@ -52,9 +52,15 @@ def launch_nodes(context):
         name='realsense2_camera',
         output='screen',
         parameters=[{
+            # Power-cycle the camera in software at startup: recovers the
+            # wedged stream state ("Frames didn't arrive within 5 seconds")
+            # that otherwise requires physically replugging the camera.
+            'initial_reset': True,
             'enable_depth': True,
-            'enable_infra1': True,
-            'enable_infra2': True,
+            # Infra streams are unused by RGB-D SLAM; disabling them reduces
+            # USB bandwidth and stream-start flakiness on old firmware.
+            'enable_infra1': False,
+            'enable_infra2': False,
             'enable_color': True,
             'align_depth.enable': True,  # creates aligned_depth_to_color topic
             # Old param names (honored by older realsense2_camera drivers, as
