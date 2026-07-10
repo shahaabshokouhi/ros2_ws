@@ -6,7 +6,7 @@
 # Camera.type), so this does NOT use $REALSENSE_CONFIG (that stays for
 # ORB-SLAM2). Override with REALSENSE_CONFIG_ORBSLAM3 if needed.
 
-export ORB_SLAM3_ROOT="${ORB_SLAM3_ROOT:-/home/shahab/ORB_SLAM3}"
+
 SETTINGS="${REALSENSE_CONFIG_ORBSLAM3:-${ORB_SLAM3_ROOT}/Examples/RGB-D/realsense.yaml}"
 
 if [ ! -f "$SETTINGS" ]; then

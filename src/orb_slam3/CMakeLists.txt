@@ -5,7 +5,8 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic -Wno-deprecated-declarations)
 endif()
 
-set(CMAKE_CXX_STANDARD 14)
+# C++17: required by the modular Pangolin (>= 0.9) headers
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ========== ROS 2 Dependencies ==========
@@ -35,11 +36,27 @@ endif()
 
 set(ORB_SLAM3_ROOT $ENV{ORB_SLAM3_ROOT})
 
-# Use the Pangolin built privately inside the ORB_SLAM3 tree (never the
-# system one, and never the ORB_SLAM2 copy). Pangolin v0.6 places its
-# config file under build/src.
-set(Pangolin_DIR ${ORB_SLAM3_ROOT}/Thirdparty/Pangolin/build/src)
-find_package(Pangolin REQUIRED PATHS ${Pangolin_DIR} NO_DEFAULT_PATH)
+# Pangolin: prefer the system-installed MODULAR Pangolin (libpango_*).
+# The monolithic Thirdparty Pangolin v0.6 is built with its RealSense video
+# driver, which drags in the system librealsense2 — and librealsense bundles
+# its own Fast-DDS that clashes with ROS 2's libfastrtps, aborting the node
+# inside rclcpp::Node construction before it prints anything. The modular
+# Pangolin has no realsense dependency, so ROS nodes must link it.
+# (The non-ROS rgbd_live binary is unaffected and keeps using the Thirdparty
+# copy via the ORB_SLAM3 build.)
+find_package(Pangolin QUIET)
+if(Pangolin_FOUND)
+  message(STATUS "Using system Pangolin: ${Pangolin_DIR}")
+  set(PANGOLIN_EXTRA_RPATH "")
+else()
+  # Fallback for machines without a system Pangolin. WARNING: this is the
+  # monolithic realsense-enabled build — if the node dies instantly with
+  # SIGABRT on this machine, install a modular Pangolin (>= 0.8) instead.
+  message(WARNING "No system Pangolin found; falling back to the Thirdparty monolithic build (potential Fast-DDS clash, see comment above)")
+  set(Pangolin_DIR ${ORB_SLAM3_ROOT}/Thirdparty/Pangolin/build/src)
+  find_package(Pangolin REQUIRED PATHS ${Pangolin_DIR} NO_DEFAULT_PATH)
+  set(PANGOLIN_EXTRA_RPATH ";${ORB_SLAM3_ROOT}/Thirdparty/Pangolin/build/src")
+endif()
 
 include_directories(
   include
@@ -91,7 +108,7 @@ target_link_libraries(orb_slam3_node
 
 set_target_properties(orb_slam3_node PROPERTIES
   BUILD_WITH_INSTALL_RPATH TRUE
-  INSTALL_RPATH "${ORB_SLAM3_ROOT}/lib;${ORB_SLAM3_ROOT}/Thirdparty/DBoW2/lib;${ORB_SLAM3_ROOT}/Thirdparty/g2o/lib;${ORB_SLAM3_ROOT}/Thirdparty/Pangolin/build/src"
+  INSTALL_RPATH "${ORB_SLAM3_ROOT}/lib;${ORB_SLAM3_ROOT}/Thirdparty/DBoW2/lib;${ORB_SLAM3_ROOT}/Thirdparty/g2o/lib${PANGOLIN_EXTRA_RPATH}"
 )
 
 # ========== Install Targets ==========
