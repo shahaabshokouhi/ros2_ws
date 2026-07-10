@@ -134,33 +134,6 @@ private:
     void syncCallback(const sensor_msgs::msg::Image::ConstSharedPtr& color_msg,
                      const sensor_msgs::msg::Image::ConstSharedPtr& depth_msg) {
 
-        // ── Sync diagnostics: processed-pair rate, color↔depth timestamp skew,
-        // and pipeline latency (how stale the frame is when we process it).
-        {
-            const double tc = rclcpp::Time(color_msg->header.stamp).seconds();
-            const double td = rclcpp::Time(depth_msg->header.stamp).seconds();
-            const double now = this->get_clock()->now().seconds();
-            diag_cnt_++;
-            const double skew_ms = std::fabs(tc - td) * 1000.0;
-            diag_skew_acc_ += skew_ms;
-            diag_skew_max_ = std::max(diag_skew_max_, skew_ms);
-            const double lat_ms = (now - tc) * 1000.0;
-            diag_lat_acc_ += lat_ms;
-            diag_lat_max_ = std::max(diag_lat_max_, lat_ms);
-            if (diag_last_print_ == 0.0) diag_last_print_ = now;
-            if (now - diag_last_print_ >= 15.0) {
-                RCLCPP_INFO(this->get_logger(),
-                    "[SyncDiag] pairs=%.1f Hz | color-depth skew avg=%.1f max=%.1f ms | latency avg=%.0f max=%.0f ms",
-                    diag_cnt_ / (now - diag_last_print_),
-                    diag_skew_acc_ / diag_cnt_, diag_skew_max_,
-                    diag_lat_acc_ / diag_cnt_, diag_lat_max_);
-                diag_last_print_ = now;
-                diag_cnt_ = 0;
-                diag_skew_acc_ = diag_skew_max_ = 0.0;
-                diag_lat_acc_ = diag_lat_max_ = 0.0;
-            }
-        }
-
         cv::Mat depth_normalized;
         cv::Mat bgr_image;
         std::vector<ORB_SLAM3::MapPoint*> vpHighQualityMapPoints;
@@ -509,12 +482,6 @@ private:
     std::atomic<uint64_t> publishedCount_{0};
     std::atomic<uint64_t> receivedCount_{0};
     std::atomic<uint64_t> importedCount_{0};
-
-    // Sync diagnostics (only touched from the sync callback thread)
-    double diag_last_print_ = 0.0;
-    int diag_cnt_ = 0;
-    double diag_skew_acc_ = 0.0, diag_skew_max_ = 0.0;
-    double diag_lat_acc_ = 0.0, diag_lat_max_ = 0.0;
 
     std::unique_ptr<ORB_SLAM3::System> slam_;
     nav_msgs::msg::Path path_msg_;
