@@ -11,4 +11,7 @@ __pycache__/
 
 *.swp
 
+# Generated at node shutdown by ExportMapPointDescriptorsCSV (per-agent);
+# these are run artifacts, not source.
+*mappoint_descriptors.csv
 
