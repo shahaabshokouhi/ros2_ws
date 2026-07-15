@@ -24,6 +24,17 @@ def generate_launch_description():
             default_value='/path/to/Settings.yaml',
             description='Path to the camera settings file (ORB-SLAM3 format)'
         ),
+        DeclareLaunchArgument(
+            'save_keyframes',
+            default_value='false',
+            description='Save keyframe RGB/depth + optimized poses to a '
+                        'slam_00N dataset (neural-sdf-lab/rgbd_pipeline format)'
+        ),
+        DeclareLaunchArgument(
+            'result_dir',
+            default_value='',
+            description='Root folder for slam_00N datasets. Empty => $HOME/result'
+        ),
         OpaqueFunction(function=launch_nodes),
     ])
 
@@ -31,6 +42,9 @@ def launch_nodes(context):
     agent        = LaunchConfiguration('agent').perform(context)
     vocab_file   = LaunchConfiguration('vocab_file').perform(context)
     settings     = LaunchConfiguration('settings_file').perform(context)
+    save_kf_str  = LaunchConfiguration('save_keyframes').perform(context)
+    result_dir   = LaunchConfiguration('result_dir').perform(context)
+    save_keyframes = save_kf_str.strip().lower() in ('true', '1', 'yes', 'on')
 
     def tgt(suffix: str) -> str:
         # build "/<agent>/<suffix>"
@@ -91,6 +105,8 @@ def launch_nodes(context):
         parameters=[
             {'vocab_file': vocab_file},
             {'settings_file': settings},
+            {'save_keyframes': save_keyframes},
+            {'result_dir': result_dir},
         ],
     )
 

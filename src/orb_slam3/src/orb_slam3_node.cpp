@@ -43,6 +43,15 @@
 #include <queue>
 #include <thread>
 #include <condition_variable>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
+#include <ctime>
+#include <cmath>
+#include <vector>
+#include <array>
+#include <algorithm>
 
 
 class ORBSLAM3Node : public rclcpp::Node {
@@ -55,6 +64,13 @@ public:
             std::string vocab_file = this->declare_parameter<std::string>("vocab_file");
             std::string settings_file = this->declare_parameter<std::string>("settings_file");
             output_dir_ = this->declare_parameter<std::string>("output_dir", ".");
+
+            // Offline neural-SDF dataset saving: when enabled, every tracked
+            // frame's RGB + raw depth is written to a slam_00N folder, and at
+            // shutdown the optimized keyframe poses are exported so the folder
+            // matches the neural-sdf-lab/rgbd_pipeline dataset format.
+            save_keyframes_    = this->declare_parameter<bool>("save_keyframes", false);
+            result_dir_param_  = this->declare_parameter<std::string>("result_dir", "");
 
             agent_name_ = this->get_name();
             const std::string color_topic = std::string("/") + agent_name_ + std::string("/camera/realsense2_camera/color/image_raw");
@@ -119,6 +135,13 @@ public:
 
             sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(10), color_sub_, depth_sub_);
             sync_->registerCallback(std::bind(&ORBSLAM3Node::syncCallback, this, std::placeholders::_1, std::placeholders::_2));
+
+            // fx_/expected_width_ are set above, so the dataset (and its
+            // metadata.json intrinsics) can be created now.
+            if (save_keyframes_) {
+                setupKeyframeDataset();
+                save_worker_ = std::thread(&ORBSLAM3Node::saveWorkerLoop, this);
+            }
         }
 
 
@@ -135,6 +158,7 @@ private:
                      const sensor_msgs::msg::Image::ConstSharedPtr& depth_msg) {
 
         cv::Mat depth_normalized;
+        cv::Mat depth_raw16;   // original 16UC1 depth in millimeters (for saving)
         cv::Mat bgr_image;
         std::vector<ORB_SLAM3::MapPoint*> vpHighQualityMapPoints;
 
@@ -152,6 +176,7 @@ private:
         try {
             auto cv_ptr = cv_bridge::toCvShare(depth_msg, sensor_msgs::image_encodings::TYPE_16UC1);
 
+            if (save_keyframes_) depth_raw16 = cv_ptr->image.clone();
             cv_ptr->image.convertTo(depth_normalized, CV_32FC1, 1.0 / 1000.0);
             depth_normalized.setTo(0.0f, cv_ptr->image == 0);
         } catch (cv_bridge::Exception& e) {
@@ -207,6 +232,14 @@ private:
         if (!trackingOk && !trackingFailed) {
             RCLCPP_WARN(this->get_logger(), "Tracking failed");
             trackingFailed = true;
+        }
+
+        // Stage the frame for the offline dataset. Only frames tracked OK can
+        // become keyframes; non-keyframe frames are pruned at shutdown, so the
+        // final slam_00N folder holds only keyframe RGB/depth + poses.
+        if (save_keyframes_ && trackingOk &&
+            !bgr_image.empty() && !depth_raw16.empty()) {
+            enqueueFrameSave(bgr_image, depth_raw16, timestamp);
         }
 
         // Create MapPointArray message
@@ -479,6 +512,319 @@ private:
         }
     }
 
+    // ================= Offline neural-SDF dataset saving =================
+    // Produces a dataset directory in the exact layout consumed by
+    // neural-sdf-lab/rgbd_pipeline (rgbd_dataset.py): metadata.json,
+    // timestamps.csv, rgb/NNNNNN.png (RGB8), depth/NNNNNN.png (raw Z16, mm),
+    // and poses.json (camera_to_world, meters). Only ORB-SLAM3 keyframes,
+    // with globally-optimized poses, survive in the final folder.
+
+    struct SavedFrame {
+        int frame_id;
+        double timestamp;
+        std::string host_utc;
+        std::string rgb_rel;
+        std::string depth_rel;
+    };
+
+    struct PoseRecord {
+        int frame_id;
+        double timestamp;
+        std::array<double, 16> matrix;  // row-major camera_to_world
+    };
+
+    struct SaveJob {
+        std::string rgb_path;
+        std::string depth_path;
+        cv::Mat rgb_bgr;
+        cv::Mat depth16;
+    };
+
+    static std::string utcNow() {
+        auto now = std::chrono::system_clock::now();
+        std::time_t t = std::chrono::system_clock::to_time_t(now);
+        std::tm tm_utc{};
+        gmtime_r(&t, &tm_utc);
+        char buf[32];
+        std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S+00:00", &tm_utc);
+        return std::string(buf);
+    }
+
+    // Pick the next unused slam_00N directory under the result root.
+    void setupKeyframeDataset() {
+        namespace fs = std::filesystem;
+        std::string root = result_dir_param_;
+        if (root.empty()) {
+            const char* home = std::getenv("HOME");
+            root = std::string(home ? home : ".") + "/result";
+        }
+        fs::path result_root(root);
+        std::error_code ec;
+        fs::create_directories(result_root, ec);
+
+        int next = 1;
+        if (fs::exists(result_root)) {
+            for (const auto& entry : fs::directory_iterator(result_root, ec)) {
+                if (!entry.is_directory()) continue;
+                const std::string name = entry.path().filename().string();
+                if (name.rfind("slam_", 0) != 0) continue;
+                try {
+                    int n = std::stoi(name.substr(5));
+                    if (n >= next) next = n + 1;
+                } catch (const std::exception&) { /* ignore non-numeric */ }
+            }
+        }
+
+        std::ostringstream folder;
+        folder << "slam_" << std::setw(3) << std::setfill('0') << next;
+        dataset_dir_ = result_root / folder.str();
+        fs::create_directories(dataset_dir_ / "rgb", ec);
+        fs::create_directories(dataset_dir_ / "depth", ec);
+
+        dataset_created_utc_ = utcNow();
+        writeMetadata(/*frame_count=*/0, /*finished=*/false);
+
+        RCLCPP_INFO(this->get_logger(),
+            "Keyframe saving ENABLED. Writing dataset to: %s",
+            dataset_dir_.c_str());
+    }
+
+    void writeMetadata(int frame_count, bool finished) {
+        std::ofstream f(dataset_dir_ / "metadata.json");
+        f << std::setprecision(10);
+        f << "{\n";
+        f << "  \"schema_version\": 1,\n";
+        f << "  \"created_utc\": \"" << dataset_created_utc_ << "\",\n";
+        f << "  \"finished_utc\": " <<
+            (finished ? "\"" + utcNow() + "\"" : std::string("null")) << ",\n";
+        f << "  \"frame_count\": " << frame_count << ",\n";
+        f << "  \"source\": \"orb_slam3_keyframes\",\n";
+        f << "  \"agent\": \"" << agent_name_ << "\",\n";
+        f << "  \"camera_backend\": \"ros2_realsense\",\n";
+        f << "  \"width\": " << expected_width_ << ",\n";
+        f << "  \"height\": " << expected_height_ << ",\n";
+        f << "  \"color_format\": \"RGB8_PNG\",\n";
+        f << "  \"depth_format\": \"Z16_PNG\",\n";
+        f << "  \"depth_aligned_to\": \"color\",\n";
+        // The node divides the incoming 16UC1 depth (millimeters) by 1000, so
+        // one raw depth unit is one millimeter.
+        f << "  \"depth_scale_m_per_unit\": 0.001,\n";
+        f << "  \"intrinsics\": {\n";
+        f << "    \"fx\": " << fx_ << ",\n";
+        f << "    \"fy\": " << fy_ << ",\n";
+        f << "    \"cx\": " << cx_ << ",\n";
+        f << "    \"cy\": " << cy_ << ",\n";
+        f << "    \"width\": " << expected_width_ << ",\n";
+        f << "    \"height\": " << expected_height_ << "\n";
+        f << "  }\n";
+        f << "}\n";
+    }
+
+    // Called from the sync (tracking) thread. Records the frame and hands the
+    // heavy PNG encoding to the writer thread so tracking stays real-time.
+    void enqueueFrameSave(const cv::Mat& bgr, const cv::Mat& depth16, double ts) {
+        char stem[16];
+        std::snprintf(stem, sizeof(stem), "%06d", next_frame_id_);
+
+        SavedFrame rec;
+        rec.frame_id  = next_frame_id_;
+        rec.timestamp = ts;
+        rec.host_utc  = utcNow();
+        rec.rgb_rel   = std::string("rgb/")   + stem + ".png";
+        rec.depth_rel = std::string("depth/") + stem + ".png";
+        saved_frames_.push_back(rec);
+        ++next_frame_id_;
+
+        SaveJob job;
+        job.rgb_path   = (dataset_dir_ / rec.rgb_rel).string();
+        job.depth_path = (dataset_dir_ / rec.depth_rel).string();
+        job.rgb_bgr    = bgr.clone();
+        job.depth16    = depth16.clone();
+        {
+            std::unique_lock<std::mutex> lk(save_queue_mtx_);
+            // Backpressure: block briefly if the disk cannot keep up rather
+            // than growing memory without bound.
+            save_queue_cv_.wait(lk, [this] {
+                return save_queue_.size() < kSaveQueueMax ||
+                       save_worker_stop_.load();
+            });
+            save_queue_.push(std::move(job));
+        }
+        save_queue_cv_.notify_one();
+    }
+
+    void saveWorkerLoop() {
+        const std::vector<int> png_params = {cv::IMWRITE_PNG_COMPRESSION, 1};
+        while (true) {
+            SaveJob job;
+            {
+                std::unique_lock<std::mutex> lk(save_queue_mtx_);
+                save_queue_cv_.wait(lk, [this] {
+                    return save_worker_stop_.load() || !save_queue_.empty();
+                });
+                if (save_queue_.empty()) break;  // empty + notified => stopping
+                job = std::move(save_queue_.front());
+                save_queue_.pop();
+            }
+            save_queue_cv_.notify_one();  // wake a producer waiting for space
+            try {
+                cv::imwrite(job.rgb_path, job.rgb_bgr, png_params);
+                cv::imwrite(job.depth_path, job.depth16, png_params);
+            } catch (const cv::Exception& e) {
+                RCLCPP_ERROR(this->get_logger(),
+                    "Failed to write dataset frame: %s", e.what());
+            }
+        }
+    }
+
+    static std::array<double, 16> quatTransToMatrix(
+        double tx, double ty, double tz,
+        double qx, double qy, double qz, double qw) {
+        const double n = std::sqrt(qx*qx + qy*qy + qz*qz + qw*qw);
+        if (n > 1e-12) { qx/=n; qy/=n; qz/=n; qw/=n; }
+        // Row-major camera-to-world homogeneous transform.
+        return {
+            1 - 2*(qy*qy + qz*qz), 2*(qx*qy - qz*qw),     2*(qx*qz + qy*qw),     tx,
+            2*(qx*qy + qz*qw),     1 - 2*(qx*qx + qz*qz), 2*(qy*qz - qx*qw),     ty,
+            2*(qx*qz - qy*qw),     2*(qy*qz + qx*qw),     1 - 2*(qx*qx + qy*qy), tz,
+            0.0,                   0.0,                   0.0,                   1.0
+        };
+    }
+
+    // Runs at shutdown, after final bundle adjustment. Exports the optimized
+    // keyframe trajectory, writes poses.json, prunes non-keyframe frames, and
+    // rewrites the manifests so the folder is a keyframe-only rgbd dataset.
+    void finalizeKeyframeDataset() {
+        namespace fs = std::filesystem;
+
+        // 1. Drain and stop the writer so every staged PNG is on disk.
+        {
+            std::lock_guard<std::mutex> lk(save_queue_mtx_);
+            save_worker_stop_.store(true);
+        }
+        save_queue_cv_.notify_all();
+        if (save_worker_.joinable()) save_worker_.join();
+
+        // 2. Export the globally-optimized keyframe trajectory (TUM). This is
+        //    the only public ORB-SLAM3 API for keyframe poses; parsing it back
+        //    avoids reaching into the private Atlas.
+        const std::string tum_path =
+            (dataset_dir_ / "keyframe_trajectory_tum.txt").string();
+        slam_->SaveKeyFrameTrajectoryTUM(tum_path);
+
+        std::vector<std::pair<double, std::array<double, 16>>> kf_poses;
+        {
+            std::ifstream tf(tum_path);
+            std::string line;
+            while (std::getline(tf, line)) {
+                if (line.empty() || line[0] == '#') continue;
+                std::istringstream ss(line);
+                double ts, tx, ty, tz, qx, qy, qz, qw;
+                if (!(ss >> ts >> tx >> ty >> tz >> qx >> qy >> qz >> qw))
+                    continue;
+                kf_poses.emplace_back(
+                    ts, quatTransToMatrix(tx, ty, tz, qx, qy, qz, qw));
+            }
+        }
+
+        // 3. Match each keyframe timestamp to a staged frame_id. The keyframe
+        //    stores the exact TrackRGBD timestamp we recorded, so matching is
+        //    effectively exact; a small tolerance guards float round-trips.
+        constexpr double kTol = 1e-3;
+        std::vector<PoseRecord> records;
+        std::vector<bool> keep(saved_frames_.size(), false);
+        for (const auto& [ts, matrix] : kf_poses) {
+            int best = -1;
+            double best_dt = kTol;
+            for (size_t i = 0; i < saved_frames_.size(); ++i) {
+                double dt = std::fabs(saved_frames_[i].timestamp - ts);
+                if (dt <= best_dt) { best_dt = dt; best = static_cast<int>(i); }
+            }
+            if (best >= 0) {
+                keep[best] = true;
+                records.push_back(
+                    {saved_frames_[best].frame_id,
+                     saved_frames_[best].timestamp, matrix});
+            }
+        }
+        std::sort(records.begin(), records.end(),
+                  [](const PoseRecord& a, const PoseRecord& b) {
+                      return a.frame_id < b.frame_id;
+                  });
+
+        // 4. poses.json (schema mirrors rgbd_dataset.write_poses).
+        writePosesJson(records);
+
+        // 5. Prune every non-keyframe image and rewrite the manifests so the
+        //    folder holds only keyframes.
+        std::error_code ec;
+        std::vector<SavedFrame> kept;
+        for (size_t i = 0; i < saved_frames_.size(); ++i) {
+            if (keep[i]) { kept.push_back(saved_frames_[i]); continue; }
+            fs::remove(dataset_dir_ / saved_frames_[i].rgb_rel, ec);
+            fs::remove(dataset_dir_ / saved_frames_[i].depth_rel, ec);
+        }
+        writeManifests(kept);
+        writeMetadata(static_cast<int>(kept.size()), /*finished=*/true);
+
+        RCLCPP_INFO(this->get_logger(),
+            "Saved %zu keyframes (from %zu tracked frames) to %s",
+            kept.size(), saved_frames_.size(), dataset_dir_.c_str());
+    }
+
+    void writePosesJson(const std::vector<PoseRecord>& records) {
+        std::ofstream f(dataset_dir_ / "poses.json");
+        f << std::setprecision(12);
+        f << "{\n";
+        f << "  \"schema_version\": 1,\n";
+        f << "  \"convention\": \"camera_to_world\",\n";
+        f << "  \"units\": \"meters\",\n";
+        f << "  \"source\": \"orb_slam3_keyframes:" << agent_name_ << "\",\n";
+        f << "  \"frames\": [\n";
+        for (size_t r = 0; r < records.size(); ++r) {
+            const PoseRecord& rec = records[r];
+            f << "    {\n";
+            f << "      \"frame_id\": " << rec.frame_id << ",\n";
+            f << "      \"camera_timestamp_s\": " << rec.timestamp << ",\n";
+            f << "      \"matrix\": [\n";
+            for (int row = 0; row < 4; ++row) {
+                f << "        [";
+                for (int col = 0; col < 4; ++col) {
+                    f << rec.matrix[row * 4 + col];
+                    if (col < 3) f << ", ";
+                }
+                f << "]" << (row < 3 ? "," : "") << "\n";
+            }
+            f << "      ]\n";
+            f << "    }" << (r + 1 < records.size() ? "," : "") << "\n";
+        }
+        f << "  ]\n";
+        f << "}\n";
+    }
+
+    void writeManifests(const std::vector<SavedFrame>& frames) {
+        std::ofstream csv(dataset_dir_ / "timestamps.csv");
+        std::ofstream rgb(dataset_dir_ / "rgb.txt");
+        std::ofstream depth(dataset_dir_ / "depth.txt");
+        std::ofstream assoc(dataset_dir_ / "associations.txt");
+        csv << "frame_id,camera_timestamp_s,host_timestamp_utc,rgb_file,depth_file\n";
+        rgb << "# timestamp rgb_filename\n";
+        depth << "# timestamp depth_filename\n";
+        assoc << "# rgb_timestamp rgb_filename depth_timestamp depth_filename\n";
+        csv << std::setprecision(6) << std::fixed;
+        rgb << std::setprecision(6) << std::fixed;
+        depth << std::setprecision(6) << std::fixed;
+        assoc << std::setprecision(6) << std::fixed;
+        for (const auto& fr : frames) {
+            csv << fr.frame_id << ',' << fr.timestamp << ',' << fr.host_utc
+                << ',' << fr.rgb_rel << ',' << fr.depth_rel << '\n';
+            rgb << fr.timestamp << ' ' << fr.rgb_rel << '\n';
+            depth << fr.timestamp << ' ' << fr.depth_rel << '\n';
+            assoc << fr.timestamp << ' ' << fr.rgb_rel << ' '
+                  << fr.timestamp << ' ' << fr.depth_rel << '\n';
+        }
+    }
+
     std::atomic<uint64_t> publishedCount_{0};
     std::atomic<uint64_t> receivedCount_{0};
     std::atomic<uint64_t> importedCount_{0};
@@ -506,6 +852,12 @@ public:
                 if (!dir.empty() && dir.back() != '/') dir += '/';
                 const std::string csv_path = dir + "mappoint_descriptors.csv";
                 slam_->mpHQmanager->ExportMapPointDescriptorsCSV(csv_path);
+            }
+
+            // Finalize the offline dataset using the now-optimized keyframe
+            // poses (must run while slam_ is still alive for the Atlas export).
+            if (save_keyframes_) {
+                finalizeKeyframeDataset();
             }
         }
     }
@@ -542,6 +894,23 @@ private:
     bool trackingFailed = false;
     std::string agent_name_;
     std::string output_dir_;
+
+    // ---- Offline neural-SDF keyframe dataset saving ----
+    bool save_keyframes_ = false;
+    std::string result_dir_param_;
+    std::filesystem::path dataset_dir_;
+    std::string dataset_created_utc_;
+    int next_frame_id_ = 0;
+
+    std::vector<SavedFrame> saved_frames_;  // sync-thread only
+
+    std::queue<SaveJob> save_queue_;
+    std::mutex save_queue_mtx_;
+    std::condition_variable save_queue_cv_;
+    std::atomic<bool> save_worker_stop_{false};
+    std::thread save_worker_;
+    size_t kSaveQueueMax = 64;
+
     std::map<std::string, std::vector<ORB_SLAM3::MapPoint*>> mImportedPointsByAgent;
     size_t kBatchSize = 50;
 
