@@ -677,20 +677,6 @@ private:
         }
     }
 
-    static std::array<double, 16> quatTransToMatrix(
-        double tx, double ty, double tz,
-        double qx, double qy, double qz, double qw) {
-        const double n = std::sqrt(qx*qx + qy*qy + qz*qz + qw*qw);
-        if (n > 1e-12) { qx/=n; qy/=n; qz/=n; qw/=n; }
-        // Row-major camera-to-world homogeneous transform.
-        return {
-            1 - 2*(qy*qy + qz*qz), 2*(qx*qy - qz*qw),     2*(qx*qz + qy*qw),     tx,
-            2*(qx*qy + qz*qw),     1 - 2*(qx*qx + qz*qz), 2*(qy*qz - qx*qw),     ty,
-            2*(qx*qz - qy*qw),     2*(qy*qz + qx*qw),     1 - 2*(qx*qx + qy*qy), tz,
-            0.0,                   0.0,                   0.0,                   1.0
-        };
-    }
-
     // Runs at shutdown, after final bundle adjustment. Exports the optimized
     // keyframe trajectory, writes poses.json, prunes non-keyframe frames, and
     // rewrites the manifests so the folder is a keyframe-only rgbd dataset.
@@ -705,26 +691,46 @@ private:
         save_queue_cv_.notify_all();
         if (save_worker_.joinable()) save_worker_.join();
 
-        // 2. Export the globally-optimized keyframe trajectory (TUM). This is
-        //    the only public ORB-SLAM3 API for keyframe poses; parsing it back
-        //    avoids reaching into the private Atlas.
+        // 2. Collect the globally-optimized poses of the MAIN map's keyframes.
+        //    The active (current) map can be a small temporary map created
+        //    after a tracking loss; the main map is the qualified, stable
+        //    shared frame the agent broadcasts. Exporting the main map keeps
+        //    poses.json in that shared frame and drops orphan temp-map frames.
+        std::vector<ORB_SLAM3::KeyFrame*> vpKFs = slam_->GetMainMapKeyFrames();
+        std::sort(vpKFs.begin(), vpKFs.end(),
+                  [](ORB_SLAM3::KeyFrame* a, ORB_SLAM3::KeyFrame* b) {
+                      return a->mnId < b->mnId;
+                  });
+
         const std::string tum_path =
             (dataset_dir_ / "keyframe_trajectory_tum.txt").string();
-        slam_->SaveKeyFrameTrajectoryTUM(tum_path);
+        std::ofstream tum(tum_path);
+        tum << std::fixed;
 
         std::vector<std::pair<double, std::array<double, 16>>> kf_poses;
-        {
-            std::ifstream tf(tum_path);
-            std::string line;
-            while (std::getline(tf, line)) {
-                if (line.empty() || line[0] == '#') continue;
-                std::istringstream ss(line);
-                double ts, tx, ty, tz, qx, qy, qz, qw;
-                if (!(ss >> ts >> tx >> ty >> tz >> qx >> qy >> qz >> qw))
-                    continue;
-                kf_poses.emplace_back(
-                    ts, quatTransToMatrix(tx, ty, tz, qx, qy, qz, qw));
-            }
+        for (ORB_SLAM3::KeyFrame* pKF : vpKFs) {
+            if (!pKF || pKF->isBad()) continue;
+            const Sophus::SE3f Twc = pKF->GetPoseInverse();
+            const Eigen::Matrix3f R = Twc.rotationMatrix();
+            const Eigen::Vector3f t = Twc.translation();
+            kf_poses.emplace_back(
+                pKF->mTimeStamp,
+                std::array<double, 16>{
+                    R(0, 0), R(0, 1), R(0, 2), t(0),
+                    R(1, 0), R(1, 1), R(1, 2), t(1),
+                    R(2, 0), R(2, 1), R(2, 2), t(2),
+                    0.0,     0.0,     0.0,     1.0});
+            const Eigen::Quaternionf q = Twc.unit_quaternion();
+            tum << std::setprecision(6) << pKF->mTimeStamp
+                << std::setprecision(7)
+                << ' ' << t(0) << ' ' << t(1) << ' ' << t(2)
+                << ' ' << q.x() << ' ' << q.y() << ' ' << q.z() << ' '
+                << q.w() << '\n';
+        }
+        if (kf_poses.empty()) {
+            RCLCPP_WARN(this->get_logger(),
+                "No MAIN map keyframes to export: no map reached the main-map "
+                "quality gate this session, so poses.json will be empty.");
         }
 
         // 3. Match each keyframe timestamp to a staged frame_id. The keyframe
