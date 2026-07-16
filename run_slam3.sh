@@ -58,4 +58,13 @@ if [ -n "$RESULT_DIR" ]; then
     LAUNCH_ARGS+=(result_dir:="$RESULT_DIR")
 fi
 
+# Optional CPU dedication for the tracking thread (see the core-dedication
+# instructions). Example: TRACKING_CPU=5 TRACKING_RTPRIO=80 ./run_slam3.sh
+if [ -n "$TRACKING_CPU" ]; then
+    LAUNCH_ARGS+=(tracking_cpu:="$TRACKING_CPU")
+fi
+if [ -n "$TRACKING_RTPRIO" ]; then
+    LAUNCH_ARGS+=(tracking_rtprio:="$TRACKING_RTPRIO")
+fi
+
 ros2 launch orb_slam3 orb_slam3.launch.py "${LAUNCH_ARGS[@]}"

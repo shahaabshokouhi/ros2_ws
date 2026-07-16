@@ -52,6 +52,8 @@
 #include <vector>
 #include <array>
 #include <algorithm>
+#include <pthread.h>
+#include <sched.h>
 
 
 class ORBSLAM3Node : public rclcpp::Node {
@@ -117,13 +119,38 @@ public:
                 agent_name_ + "/orb_slam3/image_plane", 10);
             path_msg_.header.frame_id = "map";
 
-            color_sub_.subscribe(this, color_topic);
-            depth_sub_.subscribe(this, depth_topic);
+            // Tracking (image sync) gets its own callback group so it can be
+            // spun on a dedicated thread, isolated from the inter-agent
+            // map-point receive callback and the merged-map timer. In a
+            // single-threaded executor those all share one thread with
+            // TrackRGBD, so in multi-agent runs the flood of incoming map
+            // points serializes ahead of tracking and delays frames — which is
+            // why tracking loss is far rarer in single-agent runs. Created with
+            // automatically_add_to_executor_with_node=false so main() can hand
+            // it to a separate executor.
+            tracking_cpu_    = this->declare_parameter<int>("tracking_cpu", -1);
+            tracking_rtprio_ = this->declare_parameter<int>("tracking_rtprio", 0);
+            tracking_cbg_ = this->create_callback_group(
+                rclcpp::CallbackGroupType::MutuallyExclusive,
+                /*automatically_add_to_executor_with_node=*/false);
+
+            rclcpp::SubscriptionOptions track_opts;
+            track_opts.callback_group = tracking_cbg_;
+            color_sub_.subscribe(this, color_topic, rmw_qos_profile_default, track_opts);
+            depth_sub_.subscribe(this, depth_topic, rmw_qos_profile_default, track_opts);
 
             using std::placeholders::_1;
+            // Left in the node's default callback group -> handled by the
+            // auxiliary executor, never on the tracking thread.
             mappoint_sub_ = this->create_subscription<orbslam2_msgs::msg::MapPoint>(
                 "/orb_slam2/single_mappoint", qos,
                 std::bind(&ORBSLAM3Node::importMapPointCallback, this, _1));
+            // Batched sharing channel (default). All updated agents publish and
+            // consume MapPointArray; the single-point sub above stays for a
+            // mixed fleet with legacy publishers.
+            mappoint_array_sub_ = this->create_subscription<orbslam2_msgs::msg::MapPointArray>(
+                "/orb_slam2/mappoints", qos,
+                std::bind(&ORBSLAM3Node::importMapPointArrayCallback, this, _1));
 
             // Background worker thread: processes ImportHighQualityMapPoints
             // batches so the ROS callback thread is never blocked.
@@ -344,19 +371,29 @@ private:
                 image_plane_pub_->publish(plane_msg);
             }
 
-            if (publish_mappoints) {
+            // Batched inter-agent sharing: publish this frame's high-quality
+            // points as ONE MapPointArray instead of one message per point.
+            // Each landmark record is only ~200 B, so per-message ROS/DDS
+            // overhead (headers + reliable-QoS acknowledgements) otherwise
+            // dominates the payload and congests the shared link; batching
+            // amortizes that overhead across the whole update.
+            if (publish_mappoints && !vpHighQualityMapPoints.empty()) {
                 mappoints_msg.points.reserve(vpHighQualityMapPoints.size());
-                for(auto* pMP : vpHighQualityMapPoints) {
+                for (auto* pMP : vpHighQualityMapPoints) {
                     if (!pMP || pMP->isBad()) continue;
                     mappoints_msg.points.push_back(toMsg(pMP));
+                    pMP->SentToOther(true);
                 }
-                mappoint_pub_->publish(mappoints_msg);
+                if (!mappoints_msg.points.empty()) {
+                    mappoint_pub_->publish(mappoints_msg);
+                    publishedCount_ += mappoints_msg.points.size();
+                }
             }
 
+            // Legacy per-point path (kept for a mixed fleet; off by default).
             if (publish_single_mappoint && !vpHighQualityMapPoints.empty()) {
                 for (auto* pMP : vpHighQualityMapPoints) {
                     if (!pMP) continue;
-
                     single_mappoint_pub_->publish(toMsg(pMP));
                     publishedCount_++;
                     pMP->SentToOther(true);
@@ -441,49 +478,59 @@ private:
         merged_map_pub_->publish(cloud_msg);
     }
 
-    void importMapPointCallback(const orbslam2_msgs::msg::MapPoint::SharedPtr msg)
+    // Build a received map point and stage it for the background import
+    // worker, flushing a batch once enough have accumulated for this agent.
+    void stageImportedPoint(const orbslam2_msgs::msg::MapPoint& msg)
     {
-        // Ignore our own points echoed back on the shared topic
-        if (msg->agent_name == agent_name_) return;
-
-        receivedCount_++;
-
         cv::Mat pos = (cv::Mat_<float>(3,1) <<
-            msg->position.x,
-            msg->position.y,
-            msg->position.z);
-
+            msg.position.x, msg.position.y, msg.position.z);
         cv::Mat n = (cv::Mat_<float>(3,1) <<
-            msg->normal.x,
-            msg->normal.y,
-            msg->normal.z);
-
+            msg.normal.x, msg.normal.y, msg.normal.z);
         cv::Mat desc(1, 32, CV_8U);
-        std::memcpy(desc.ptr<uint8_t>(), msg->descriptor.data(), 32);
-
-        std::vector<int> keyframe_ids(msg->keyframe_ids.begin(), msg->keyframe_ids.end());
+        std::memcpy(desc.ptr<uint8_t>(), msg.descriptor.data(), 32);
+        std::vector<int> keyframe_ids(msg.keyframe_ids.begin(), msg.keyframe_ids.end());
 
         auto* pMP = new ORB_SLAM3::MapPoint(
-            msg->id,
-            pos,
-            n,
-            desc,
-            msg->min_distance,
-            msg->max_distance,
-            msg->is_bad,
-            keyframe_ids);
-        pMP->mbHighQaulity = msg->is_high_quality;
+            msg.id, pos, n, desc,
+            msg.min_distance, msg.max_distance, msg.is_bad, keyframe_ids);
+        pMP->mbHighQaulity = msg.is_high_quality;
 
-        auto &agentVec = mImportedPointsByAgent[msg->agent_name];
+        auto &agentVec = mImportedPointsByAgent[msg.agent_name];
         agentVec.push_back(pMP);
+        if (agentVec.size() >= kBatchSize)
+            flushImportedBatch(msg.agent_name);
+    }
 
-        if (agentVec.size() >= kBatchSize) {
-            {
-                std::lock_guard<std::mutex> lk(import_queue_mtx_);
-                import_queue_.push({msg->agent_name, std::move(agentVec)});
-            }
-            import_queue_cv_.notify_one();
+    void flushImportedBatch(const std::string& agent_name)
+    {
+        auto &agentVec = mImportedPointsByAgent[agent_name];
+        if (agentVec.empty()) return;
+        {
+            std::lock_guard<std::mutex> lk(import_queue_mtx_);
+            import_queue_.push({agent_name, std::move(agentVec)});
         }
+        import_queue_cv_.notify_one();
+    }
+
+    // Legacy per-point receive path (mixed fleet / backward compatibility).
+    void importMapPointCallback(const orbslam2_msgs::msg::MapPoint::SharedPtr msg)
+    {
+        if (msg->agent_name == agent_name_) return;  // ignore our own echo
+        receivedCount_++;
+        stageImportedPoint(*msg);
+    }
+
+    // Batched receive path: one MapPointArray carries many landmarks.
+    void importMapPointArrayCallback(const orbslam2_msgs::msg::MapPointArray::SharedPtr msg)
+    {
+        if (msg->agent_name == agent_name_) return;  // ignore our own echo
+        for (const auto& pt : msg->points) {
+            receivedCount_++;
+            stageImportedPoint(pt);
+        }
+        // An array is already a batch; flush the remainder so its points do
+        // not wait behind the per-agent accumulation threshold.
+        flushImportedBatch(msg->agent_name);
     }
 
     void importWorkerLoop() {
@@ -839,6 +886,11 @@ private:
     nav_msgs::msg::Path path_msg_;
 
 public:
+    // Accessors used by main() to run tracking on its own executor/thread.
+    rclcpp::CallbackGroup::SharedPtr trackingCallbackGroup() const { return tracking_cbg_; }
+    int trackingCpu() const { return tracking_cpu_; }
+    int trackingRtPrio() const { return tracking_rtprio_; }
+
     void onShutdown() {
         // Stop the background import worker before touching SLAM internals
         {
@@ -883,11 +935,18 @@ private:
     message_filters::Subscriber<sensor_msgs::msg::Image> color_sub_;
     message_filters::Subscriber<sensor_msgs::msg::Image> depth_sub_;
     rclcpp::Subscription<orbslam2_msgs::msg::MapPoint>::SharedPtr mappoint_sub_;
+    rclcpp::Subscription<orbslam2_msgs::msg::MapPointArray>::SharedPtr mappoint_array_sub_;
 
     using SyncPolicy = message_filters::sync_policies::ApproximateTime<
         sensor_msgs::msg::Image, sensor_msgs::msg::Image>;
 
     std::shared_ptr<message_filters::Synchronizer<SyncPolicy>> sync_;
+
+    // Dedicated tracking executor plumbing (set in the constructor, consumed
+    // by main()).
+    rclcpp::CallbackGroup::SharedPtr tracking_cbg_;
+    int tracking_cpu_ = -1;      // pin tracking thread to this CPU; -1 = don't
+    int tracking_rtprio_ = 0;    // SCHED_FIFO priority; 0 = normal scheduling
 
     float fx_ = 0.0f;
     float fy_ = 0.0f;
@@ -895,8 +954,8 @@ private:
     float cy_ = 0.0f;
     int expected_width_ = 0;
     int expected_height_ = 0;
-    bool publish_mappoints = false;
-    bool publish_single_mappoint = true;
+    bool publish_mappoints = true;         // batched MapPointArray (default)
+    bool publish_single_mappoint = false;  // legacy per-point path (mixed fleet)
     bool trackingFailed = false;
     std::string agent_name_;
     std::string output_dir_;
@@ -932,10 +991,66 @@ private:
     std::thread import_worker_;
 };
 
+// Runs on the dedicated tracking thread before it starts spinning. Names the
+// thread (so it is easy to find in `top -H`/`ps -T`) and, if requested via
+// params, pins it to a CPU and raises it to real-time priority.
+static void configureTrackingThread(const std::shared_ptr<ORBSLAM3Node>& node) {
+    pthread_setname_np(pthread_self(), "orbslam_track");
+
+    const int cpu = node->trackingCpu();
+    if (cpu >= 0) {
+        cpu_set_t set;
+        CPU_ZERO(&set);
+        CPU_SET(cpu, &set);
+        if (pthread_setaffinity_np(pthread_self(), sizeof(set), &set) != 0)
+            RCLCPP_WARN(node->get_logger(),
+                "Could not pin tracking thread to CPU %d", cpu);
+        else
+            RCLCPP_INFO(node->get_logger(),
+                "Tracking thread pinned to CPU %d", cpu);
+    }
+
+    const int prio = node->trackingRtPrio();
+    if (prio > 0) {
+        struct sched_param sp;
+        sp.sched_priority = prio;
+        if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) != 0)
+            RCLCPP_WARN(node->get_logger(),
+                "Could not set SCHED_FIFO prio %d on tracking thread "
+                "(need CAP_SYS_NICE or an rtprio ulimit)", prio);
+        else
+            RCLCPP_INFO(node->get_logger(),
+                "Tracking thread set to SCHED_FIFO prio %d", prio);
+    }
+}
+
 int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
     auto node = std::make_shared<ORBSLAM3Node>(rclcpp::NodeOptions());
-    rclcpp::spin(node);
+
+    // Two executors so tracking never shares a thread with the inter-agent
+    // map-point receive callback or the merged-map timer:
+    //   * tracking_exec  -> only the tracking callback group (image sync),
+    //                       spun on a dedicated, optionally CPU-pinned thread.
+    //   * aux_exec       -> everything else (map-point rx, timer, params),
+    //                       spun on the main thread.
+    rclcpp::executors::SingleThreadedExecutor tracking_exec;
+    tracking_exec.add_callback_group(
+        node->trackingCallbackGroup(), node->get_node_base_interface());
+
+    rclcpp::executors::SingleThreadedExecutor aux_exec;
+    aux_exec.add_node(node);
+
+    std::thread tracking_thread([&]() {
+        configureTrackingThread(node);
+        tracking_exec.spin();
+    });
+
+    aux_exec.spin();  // blocks until shutdown (Ctrl-C / rclcpp::shutdown)
+
+    tracking_exec.cancel();
+    if (tracking_thread.joinable()) tracking_thread.join();
+
     node->onShutdown();
     rclcpp::shutdown();
     return 0;

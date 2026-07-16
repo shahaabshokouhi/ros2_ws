@@ -35,6 +35,16 @@ def generate_launch_description():
             default_value='',
             description='Root folder for slam_00N datasets. Empty => $HOME/result'
         ),
+        DeclareLaunchArgument(
+            'tracking_cpu',
+            default_value='-1',
+            description='Pin the tracking thread to this CPU core; -1 = no pin'
+        ),
+        DeclareLaunchArgument(
+            'tracking_rtprio',
+            default_value='0',
+            description='SCHED_FIFO priority for the tracking thread; 0 = normal'
+        ),
         OpaqueFunction(function=launch_nodes),
     ])
 
@@ -45,6 +55,8 @@ def launch_nodes(context):
     save_kf_str  = LaunchConfiguration('save_keyframes').perform(context)
     result_dir   = LaunchConfiguration('result_dir').perform(context)
     save_keyframes = save_kf_str.strip().lower() in ('true', '1', 'yes', 'on')
+    tracking_cpu    = int(LaunchConfiguration('tracking_cpu').perform(context))
+    tracking_rtprio = int(LaunchConfiguration('tracking_rtprio').perform(context))
 
     def tgt(suffix: str) -> str:
         # build "/<agent>/<suffix>"
@@ -90,6 +102,26 @@ def launch_nodes(context):
             # which silently breaks SLAM calibrated for 640x480):
             'rgb_camera.color_profile': '640x480x30',
             'depth_module.depth_profile': '640x480x30',
+
+            # --- Motion blur during turns ---
+            # Auto-exposure is left ON so the image never goes dark. Its only
+            # weakness is that in a dim room it lengthens exposure, and a long
+            # exposure smears the image while the robot rotates -> tracking
+            # loses its features. realsense2_camera 4.58 has no "auto-exposure
+            # priority" cap, so the fixes are: (a) add light to the room (auto
+            # exposure then picks a short, sharp shutter by itself), or (b)
+            # switch the COLOR sensor to manual exposure below.
+            #
+            # To use manual exposure: run `realsense-viewer`, open the Color
+            # stream > Controls, turn OFF "Enable Auto Exposure", and lower
+            # "Exposure" until the image is sharp while you wave the camera but
+            # still bright enough to see texture (raise "Gain" a little if it
+            # gets too dark). Read those two numbers off, then uncomment and
+            # set them here. Exposure is in microseconds; gain is 16-248.
+            # 'rgb_camera.enable_auto_exposure': False,
+            # 'rgb_camera.exposure': 200,
+            # 'rgb_camera.gain': 64,
+
             'publish_tf': False,
         }],
         remappings=rs_remaps,
@@ -107,6 +139,8 @@ def launch_nodes(context):
             {'settings_file': settings},
             {'save_keyframes': save_keyframes},
             {'result_dir': result_dir},
+            {'tracking_cpu': tracking_cpu},
+            {'tracking_rtprio': tracking_rtprio},
         ],
     )
 
