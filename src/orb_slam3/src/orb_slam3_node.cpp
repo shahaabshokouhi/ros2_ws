@@ -380,7 +380,13 @@ private:
             if (publish_mappoints && !vpHighQualityMapPoints.empty()) {
                 mappoints_msg.points.reserve(vpHighQualityMapPoints.size());
                 for (auto* pMP : vpHighQualityMapPoints) {
-                    if (!pMP || pMP->isBad()) continue;
+                    if (!pMP) continue;
+                    // Do NOT skip bad points here: Map::EraseMapPoint /
+                    // RemoveHighQaulityMapPoints deliberately re-queues a point
+                    // that already went bad so it is popped again with
+                    // is_bad=true -- that is how peers learn to purge it
+                    // (see HQmanager::ImportHighQualityMapPoints). Dropping it
+                    // here silently breaks bad-point propagation.
                     mappoints_msg.points.push_back(toMsg(pMP));
                     pMP->SentToOther(true);
                 }
