@@ -105,6 +105,8 @@ public:
                 agent_name_ + "/orb_slam3/hq_pointcloud", 10);
             merged_map_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
                 agent_name_ + "/orb_slam3/merged_map", 10);
+            merge_tf_pub_ = this->create_publisher<geometry_msgs::msg::TransformStamped>(
+                agent_name_ + "/orb_slam3/merge_transform", 10);
             pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
                 agent_name_ + "/orb_slam3/pose", 10);
             // Inter-agent topics: identical to the ORB-SLAM2 node for wire
@@ -482,6 +484,58 @@ private:
 
         cloud_msg.width = static_cast<uint32_t>(pts.size());
         merged_map_pub_->publish(cloud_msg);
+
+        // Publish inter-agent transforms (T_me_from_other) converted to ROS frame.
+        // ORB-SLAM uses (x-right, y-down, z-forward); ROS uses (x-forward, y-left, z-up).
+        // Coordinate change matrix C maps ORB→ROS:
+        //   x_ros =  z_orb,  y_ros = -x_orb,  z_ros = -y_orb
+        // R_ros = C * R_orb * C^T,  t_ros = C * t_orb
+        auto tfs = slam_->mpHQmanager->GetCurrentTransforms();
+        auto now = this->get_clock()->now();
+        for (const auto& [other_name, R_orb, t_orb] : tfs) {
+            // C * R_orb * C^T
+            // C = [[0,0,1],[-1,0,0],[0,-1,0]]
+            // C^T = [[0,-1,0],[0,0,-1],[1,0,0]]
+            cv::Matx33d R_ros;
+            for (int i = 0; i < 3; ++i) {
+                // C * row of R_orb: map column j through C^T
+                // R_ros(i,j) = sum_k sum_l C(i,k)*R_orb(k,l)*C^T(l,j)
+                // Shortcut using C structure:
+                // row0_C = [0,0,1], row1_C = [-1,0,0], row2_C = [0,-1,0]
+                // col0_CT = [0,-1,0], col1_CT = [0,0,-1], col2_CT = [1,0,0]
+            }
+            // Direct computation:
+            // R_ros = C * R * C^T where C maps (x,y,z)→(z,-x,-y)
+            R_ros(0,0) =  R_orb(2,2);  R_ros(0,1) = -R_orb(2,0);  R_ros(0,2) = -R_orb(2,1);
+            R_ros(1,0) = -R_orb(0,2);  R_ros(1,1) =  R_orb(0,0);  R_ros(1,2) =  R_orb(0,1);
+            R_ros(2,0) = -R_orb(1,2);  R_ros(2,1) =  R_orb(1,0);  R_ros(2,2) =  R_orb(1,1);
+
+            // t_ros = C * t_orb
+            double tx =  t_orb[2];
+            double ty = -t_orb[0];
+            double tz = -t_orb[1];
+
+            // Convert rotation to quaternion via tf2
+            tf2::Matrix3x3 m(
+                R_ros(0,0), R_ros(0,1), R_ros(0,2),
+                R_ros(1,0), R_ros(1,1), R_ros(1,2),
+                R_ros(2,0), R_ros(2,1), R_ros(2,2));
+            tf2::Quaternion q;
+            m.getRotation(q);
+
+            geometry_msgs::msg::TransformStamped tf_msg;
+            tf_msg.header.stamp = now;
+            tf_msg.header.frame_id = agent_name_;
+            tf_msg.child_frame_id = other_name;
+            tf_msg.transform.translation.x = tx;
+            tf_msg.transform.translation.y = ty;
+            tf_msg.transform.translation.z = tz;
+            tf_msg.transform.rotation.x = q.x();
+            tf_msg.transform.rotation.y = q.y();
+            tf_msg.transform.rotation.z = q.z();
+            tf_msg.transform.rotation.w = q.w();
+            merge_tf_pub_->publish(tf_msg);
+        }
     }
 
     // Build a received map point and stage it for the background import
@@ -934,6 +988,7 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr hq_pointcloud_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr merged_map_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::TransformStamped>::SharedPtr merge_tf_pub_;
     rclcpp::TimerBase::SharedPtr merged_map_timer_;
     rclcpp::Publisher<orbslam2_msgs::msg::MapPointArray>::SharedPtr mappoint_pub_;
     rclcpp::Publisher<orbslam2_msgs::msg::MapPoint>::SharedPtr single_mappoint_pub_;
