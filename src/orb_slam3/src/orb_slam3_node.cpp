@@ -31,6 +31,7 @@
 
 #include <orbslam2_msgs/msg/map_point.hpp>
 #include <orbslam2_msgs/msg/map_point_array.hpp>
+#include <orbslam2_msgs/msg/key_frame_bo_w.hpp>
 
 #include <MapPoint.h>
 #include <System.h>
@@ -75,6 +76,7 @@ public:
             result_dir_param_  = this->declare_parameter<std::string>("result_dir", "");
 
             agent_name_ = this->get_name();
+            ma_method_ = this->declare_parameter<std::string>("ma_method", "hq-mpshare");
             const std::string color_topic = std::string("/") + agent_name_ + std::string("/camera/realsense2_camera/color/image_raw");
             const std::string depth_topic = std::string("/") + agent_name_ + std::string("/camera/realsense2_camera/depth/image_rect_raw");
 
@@ -85,7 +87,8 @@ public:
                 /*bUseViewer=*/false,
                 /*initFr=*/0,
                 /*strSequence=*/std::string(),
-                agent_name_);
+                agent_name_,
+                ma_method_);
 
             // ORB-SLAM3 settings use the Camera1.* keys; fall back to the
             // ORB-SLAM2 Camera.* names so either file format works here.
@@ -115,6 +118,8 @@ public:
                 "orb_slam2/mappoints", 10);
             single_mappoint_pub_ = this->create_publisher<orbslam2_msgs::msg::MapPoint>(
                 "orb_slam2/single_mappoint", qos);
+            kf_bow_pub_ = this->create_publisher<orbslam2_msgs::msg::KeyFrameBoW>(
+                "orb_slam2/kf_bow", qos);
             path_pub_ = this->create_publisher<nav_msgs::msg::Path>(
                 agent_name_ + "/orb_slam3/path", 10);
             image_plane_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
@@ -153,6 +158,9 @@ public:
             mappoint_array_sub_ = this->create_subscription<orbslam2_msgs::msg::MapPointArray>(
                 "/orb_slam2/mappoints", qos,
                 std::bind(&ORBSLAM3Node::importMapPointArrayCallback, this, _1));
+            kf_bow_sub_ = this->create_subscription<orbslam2_msgs::msg::KeyFrameBoW>(
+                "/orb_slam2/kf_bow", qos,
+                std::bind(&ORBSLAM3Node::importKeyFrameBoWCallback, this, _1));
 
             // Background worker thread: processes ImportHighQualityMapPoints
             // batches so the ROS callback thread is never blocked.
@@ -387,7 +395,7 @@ private:
                     // RemoveHighQaulityMapPoints deliberately re-queues a point
                     // that already went bad so it is popped again with
                     // is_bad=true -- that is how peers learn to purge it
-                    // (see HQmanager::ImportHighQualityMapPoints). Dropping it
+                    // (see MultiAgentManager::ImportHighQualityMapPoints). Dropping it
                     // here silently breaks bad-point propagation.
                     mappoints_msg.points.push_back(toMsg(pMP));
                     pMP->SentToOther(true);
@@ -458,9 +466,9 @@ private:
     }
 
     void publishMergedMap() {
-        if (!slam_ || !slam_->mpHQmanager) return;
+        if (!slam_ || !slam_->mpMA) return;
 
-        std::vector<cv::Point3f> pts = slam_->mpHQmanager->ExportMergedMap();
+        std::vector<cv::Point3f> pts = slam_->mpMA->ExportMergedMap();
         if (pts.empty()) return;
 
         sensor_msgs::msg::PointCloud2 cloud_msg;
@@ -490,7 +498,7 @@ private:
         // Coordinate change matrix C maps ORB→ROS:
         //   x_ros =  z_orb,  y_ros = -x_orb,  z_ros = -y_orb
         // R_ros = C * R_orb * C^T,  t_ros = C * t_orb
-        auto tfs = slam_->mpHQmanager->GetCurrentTransforms();
+        auto tfs = slam_->mpMA->GetCurrentTransforms();
         auto now = this->get_clock()->now();
         for (const auto& [other_name, R_orb, t_orb] : tfs) {
             // C * R_orb * C^T
@@ -535,6 +543,25 @@ private:
             tf_msg.transform.rotation.z = q.z();
             tf_msg.transform.rotation.w = q.w();
             merge_tf_pub_->publish(tf_msg);
+        }
+
+        // Publish pending KF BoWs when using "new" method
+        if (slam_->mpMA->GetMAMethod() == "new") {
+            auto pendingBows = slam_->mpMA->GetPendingBoWs();
+            for (const auto& entry : pendingBows) {
+                orbslam2_msgs::msg::KeyFrameBoW msg;
+                msg.keyframe_id = entry.kf_id;
+                msg.agent_name = agent_name_;
+                msg.stamp = now;
+
+                msg.word_ids.reserve(entry.bow.size());
+                msg.word_values.reserve(entry.bow.size());
+                for (const auto& [wordId, wordVal] : entry.bow) {
+                    msg.word_ids.push_back(static_cast<uint32_t>(wordId));
+                    msg.word_values.push_back(wordVal);
+                }
+                kf_bow_pub_->publish(msg);
+            }
         }
     }
 
@@ -593,6 +620,18 @@ private:
         flushImportedBatch(msg->agent_name);
     }
 
+    void importKeyFrameBoWCallback(const orbslam2_msgs::msg::KeyFrameBoW::SharedPtr msg)
+    {
+        if (msg->agent_name == agent_name_) return;  // ignore our own echo
+        DBoW2::BowVector bow;
+        for (size_t i = 0; i < msg->word_ids.size() && i < msg->word_values.size(); ++i) {
+            bow.addWeight(msg->word_ids[i], msg->word_values[i]);
+        }
+        if (slam_ && slam_->mpMA) {
+            slam_->mpMA->ImportKeyFrameBoW(msg->agent_name, msg->keyframe_id, bow);
+        }
+    }
+
     void importWorkerLoop() {
         while (true) {
             ImportBatch batch;
@@ -605,9 +644,9 @@ private:
                 batch = std::move(import_queue_.front());
                 import_queue_.pop();
             }
-            if (slam_ && slam_->mpHQmanager) {
+            if (slam_ && slam_->mpMA) {
                 try {
-                    slam_->mpHQmanager->ImportHighQualityMapPoints(batch.agent_name, batch.points);
+                    slam_->mpMA->ImportHighQualityMapPoints(batch.agent_name, batch.points);
                     importedCount_ += batch.points.size();
                 } catch (const cv::Exception& e) {
                     std::cerr << "[importWorker] cv::Exception in ImportHighQualityMapPoints: "
@@ -965,11 +1004,11 @@ public:
             slam_->Shutdown();
             std::cout << "[ORBSLAM3Node] SLAM shutdown complete.\n";
 
-            if (slam_->mpHQmanager) {
+            if (slam_->mpMA) {
                 std::string dir = output_dir_;
                 if (!dir.empty() && dir.back() != '/') dir += '/';
                 const std::string csv_path = dir + "mappoint_descriptors.csv";
-                slam_->mpHQmanager->ExportMapPointDescriptorsCSV(csv_path);
+                slam_->mpMA->ExportMapPointDescriptorsCSV(csv_path);
             }
 
             // Finalize the offline dataset using the now-optimized keyframe
@@ -997,6 +1036,9 @@ private:
     message_filters::Subscriber<sensor_msgs::msg::Image> depth_sub_;
     rclcpp::Subscription<orbslam2_msgs::msg::MapPoint>::SharedPtr mappoint_sub_;
     rclcpp::Subscription<orbslam2_msgs::msg::MapPointArray>::SharedPtr mappoint_array_sub_;
+    rclcpp::Publisher<orbslam2_msgs::msg::KeyFrameBoW>::SharedPtr kf_bow_pub_;
+    rclcpp::Subscription<orbslam2_msgs::msg::KeyFrameBoW>::SharedPtr kf_bow_sub_;
+    std::string ma_method_;
 
     using SyncPolicy = message_filters::sync_policies::ApproximateTime<
         sensor_msgs::msg::Image, sensor_msgs::msg::Image>;

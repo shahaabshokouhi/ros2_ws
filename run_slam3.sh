@@ -9,6 +9,8 @@
 # Usage:
 #   ./run_slam3.sh                 # run SLAM, do NOT save keyframes (default)
 #   ./run_slam3.sh --save          # also save keyframes for offline neural SDF
+#   ./run_slam3.sh --method new    # use BoW-sharing multi-agent method
+#   ./run_slam3.sh --save --method new   # combine flags
 #
 # When saving is on, each keyframe's RGB + depth and the final optimized
 # keyframe poses are written to a slam_00N folder (default under ~/result) in
@@ -16,13 +18,20 @@
 # the RESULT_DIR environment variable.
 
 SAVE_KEYFRAMES=false
-for arg in "$@"; do
-    case "$arg" in
+MA_METHOD="hq-mpshare"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         --save|--save-keyframes|save|yes|true)
             SAVE_KEYFRAMES=true
+            shift
+            ;;
+        --method)
+            MA_METHOD="$2"
+            shift 2
             ;;
         *)
-            echo "Unknown argument: $arg (use --save to enable keyframe saving)"
+            echo "Unknown argument: $1"
+            echo "Usage: ./run_slam3.sh [--save] [--method hq-mpshare|new]"
             exit 1
             ;;
     esac
@@ -42,6 +51,7 @@ if [ "$SAVE_KEYFRAMES" = "true" ]; then
 else
     echo "Keyframe saving: disabled"
 fi
+echo "MA method: $MA_METHOD"
 
 colcon build --packages-select orb_slam3 --cmake-clean-cache
 source install/setup.bash
@@ -53,6 +63,7 @@ LAUNCH_ARGS=(
     vocab_file:=${ORB_SLAM3_ROOT}/Vocabulary/ORBvoc.txt
     settings_file:="$REALSENSE3_CONFIG"
     save_keyframes:="$SAVE_KEYFRAMES"
+    ma_method:="$MA_METHOD"
 )
 if [ -n "$RESULT_DIR" ]; then
     LAUNCH_ARGS+=(result_dir:="$RESULT_DIR")

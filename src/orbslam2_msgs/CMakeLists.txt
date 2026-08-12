@@ -11,6 +11,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MapPoint.msg"
   "msg/MapPointArray.msg"
   "msg/Position.msg"
+  "msg/KeyFrameBoW.msg"
   DEPENDENCIES builtin_interfaces geometry_msgs std_msgs
 )
 

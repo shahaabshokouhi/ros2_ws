@@ -45,6 +45,11 @@ def generate_launch_description():
             default_value='0',
             description='SCHED_FIFO priority for the tracking thread; 0 = normal'
         ),
+        DeclareLaunchArgument(
+            'ma_method',
+            default_value='hq-mpshare',
+            description='Multi-agent method: hq-mpshare (map point sharing) or new (BoW sharing)'
+        ),
         OpaqueFunction(function=launch_nodes),
     ])
 
@@ -57,6 +62,7 @@ def launch_nodes(context):
     save_keyframes = save_kf_str.strip().lower() in ('true', '1', 'yes', 'on')
     tracking_cpu    = int(LaunchConfiguration('tracking_cpu').perform(context))
     tracking_rtprio = int(LaunchConfiguration('tracking_rtprio').perform(context))
+    ma_method       = LaunchConfiguration('ma_method').perform(context)
 
     def tgt(suffix: str) -> str:
         # build "/<agent>/<suffix>"
@@ -141,6 +147,7 @@ def launch_nodes(context):
             {'result_dir': result_dir},
             {'tracking_cpu': tracking_cpu},
             {'tracking_rtprio': tracking_rtprio},
+            {'ma_method': ma_method},
         ],
     )
 
