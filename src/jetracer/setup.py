@@ -29,6 +29,7 @@ setup(
         'console_scripts': [
             'teleop_joy = scripts.teleop_joy:main',
             'pid_controlller = scripts.pid_controller:main',
+            'jetson_monitor = jetracer.jetson_monitor:main',
         ],
     },
 )

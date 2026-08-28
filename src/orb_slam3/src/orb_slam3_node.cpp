@@ -28,6 +28,8 @@
 #include <nav_msgs/msg/path.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
+#include <std_msgs/msg/multi_array_dimension.hpp>
 
 #include <orbslam2_msgs/msg/map_point.hpp>
 #include <orbslam2_msgs/msg/map_point_array.hpp>
@@ -122,8 +124,13 @@ public:
                 "orb_slam2/kf_bow", qos);
             path_pub_ = this->create_publisher<nav_msgs::msg::Path>(
                 agent_name_ + "/orb_slam3/path", 10);
-            image_plane_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
-                agent_name_ + "/orb_slam3/image_plane", 10);
+            // image_plane_pub_ disabled — image-plane point-cloud publishing
+            // was commented out (user request). Re-enable by uncommenting both
+            // this and the image_plane_pub_ member + publish block in syncCallback.
+            // image_plane_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+            //     agent_name_ + "/orb_slam3/image_plane", 10);
+            slam_metrics_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>(
+                agent_name_ + "/orb_slam3/slam_metrics", 10);
             path_msg_.header.frame_id = "map";
 
             // Tracking (image sync) gets its own callback group so it can be
@@ -254,7 +261,10 @@ private:
             }
 
             try {
+                const auto t0 = std::chrono::steady_clock::now();
                 Tcw = slam_->TrackRGBD(bgr_image, depth_normalized, timestamp);
+                last_track_ms_ = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t0).count();
                 trackingOk = (slam_->GetTrackingState() == ORB_SLAM3::Tracking::OK);
                 vpHighQualityMapPoints = slam_->PopNewHighQualityMapPoints();
             } catch (const cv::Exception& e) {
@@ -341,45 +351,46 @@ private:
             tf_stamped.transform.rotation.w = q_map_cam.w();
             tf_broadcaster_->sendTransform(tf_stamped);
 
-            // Project image pixels to 3D in camera frame → floating image plane in RViz
-            if (!bgr_image.empty() && image_plane_pub_->get_subscription_count() > 0) {
-                constexpr int STEP = 8;          // sample every Nth pixel
-                constexpr float PLANE_DEPTH = 0.5f; // meters in front of camera
-                const int rows = bgr_image.rows;
-                const int cols = bgr_image.cols;
-
-                sensor_msgs::msg::PointCloud2 plane_msg;
-                plane_msg.header.stamp = color_msg->header.stamp;
-                plane_msg.header.frame_id = "camera_color_optical_frame";
-                plane_msg.height = 1;
-                plane_msg.is_dense = true;
-
-                sensor_msgs::PointCloud2Modifier mod(plane_msg);
-                mod.setPointCloud2FieldsByString(2, "xyz", "rgb");
-                mod.resize(((rows + STEP - 1) / STEP) * ((cols + STEP - 1) / STEP));
-
-                sensor_msgs::PointCloud2Iterator<float>   it_x(plane_msg, "x");
-                sensor_msgs::PointCloud2Iterator<float>   it_y(plane_msg, "y");
-                sensor_msgs::PointCloud2Iterator<float>   it_z(plane_msg, "z");
-                sensor_msgs::PointCloud2Iterator<float>   it_rgb(plane_msg, "rgb");
-
-                size_t count = 0;
-                for (int v = 0; v < rows; v += STEP) {
-                    for (int u = 0; u < cols; u += STEP) {
-                        *it_x = (u - cx_) / fx_ * PLANE_DEPTH;
-                        *it_y = (v - cy_) / fy_ * PLANE_DEPTH;
-                        *it_z = PLANE_DEPTH;
-                        const cv::Vec3b& px = bgr_image.at<cv::Vec3b>(v, u);
-                        uint32_t rgb = ((uint32_t)px[2] << 16) | ((uint32_t)px[1] << 8) | (uint32_t)px[0];
-                        std::memcpy(&(*it_rgb), &rgb, sizeof(float));
-                        ++it_x; ++it_y; ++it_z; ++it_rgb;
-                        ++count;
-                    }
-                }
-                plane_msg.width = static_cast<uint32_t>(count);
-                mod.resize(count);
-                image_plane_pub_->publish(plane_msg);
-            }
+            // ---- Image plane point-cloud (commented out — user request) ----
+            // Projects sampled image pixels to a fixed-depth plane in the camera
+            // frame for RViz visualization. Re-enable by uncommenting the block
+            // below AND the image_plane_pub_ publisher creation in the constructor.
+            //
+            // if (!bgr_image.empty() && image_plane_pub_->get_subscription_count() > 0) {
+            //     constexpr int STEP = 8;
+            //     constexpr float PLANE_DEPTH = 0.5f;
+            //     const int rows = bgr_image.rows;
+            //     const int cols = bgr_image.cols;
+            //     sensor_msgs::msg::PointCloud2 plane_msg;
+            //     plane_msg.header.stamp = color_msg->header.stamp;
+            //     plane_msg.header.frame_id = "camera_color_optical_frame";
+            //     plane_msg.height = 1;
+            //     plane_msg.is_dense = true;
+            //     sensor_msgs::PointCloud2Modifier mod(plane_msg);
+            //     mod.setPointCloud2FieldsByString(2, "xyz", "rgb");
+            //     mod.resize(((rows + STEP - 1) / STEP) * ((cols + STEP - 1) / STEP));
+            //     sensor_msgs::PointCloud2Iterator<float> it_x(plane_msg, "x");
+            //     sensor_msgs::PointCloud2Iterator<float> it_y(plane_msg, "y");
+            //     sensor_msgs::PointCloud2Iterator<float> it_z(plane_msg, "z");
+            //     sensor_msgs::PointCloud2Iterator<float> it_rgb(plane_msg, "rgb");
+            //     size_t count = 0;
+            //     for (int v = 0; v < rows; v += STEP) {
+            //         for (int u = 0; u < cols; u += STEP) {
+            //             *it_x = (u - cx_) / fx_ * PLANE_DEPTH;
+            //             *it_y = (v - cy_) / fy_ * PLANE_DEPTH;
+            //             *it_z = PLANE_DEPTH;
+            //             const cv::Vec3b& px = bgr_image.at<cv::Vec3b>(v, u);
+            //             uint32_t rgb = ((uint32_t)px[2] << 16) |
+            //                            ((uint32_t)px[1] << 8)  | (uint32_t)px[0];
+            //             std::memcpy(&(*it_rgb), &rgb, sizeof(float));
+            //             ++it_x; ++it_y; ++it_z; ++it_rgb;
+            //             ++count;
+            //         }
+            //     }
+            //     plane_msg.width = static_cast<uint32_t>(count);
+            //     mod.resize(count);
+            //     image_plane_pub_->publish(plane_msg);
+            // }
 
             // Batched inter-agent sharing: publish this frame's high-quality
             // points as ONE MapPointArray instead of one message per point.
@@ -420,6 +431,43 @@ private:
 
         // Publish the path
         path_pub_->publish(path_msg_);
+
+        // Publish SLAM-internal metrics for the scheduler.
+        // Indices: 0=track_ms, 1=tracking_state, 2=map_points,
+        //          3=hq_map_points, 4=import_queue_depth,
+        //          5=published_total, 6=imported_total
+        {
+            std_msgs::msg::Float64MultiArray m;
+            std_msgs::msg::MultiArrayDimension dim;
+            dim.label  = "track_ms,tracking_state,map_points,hq_map_points,"
+                         "import_queue_depth,published_total,imported_total";
+            dim.size   = 7;
+            dim.stride = 7;
+            m.layout.dim.push_back(dim);
+
+            int tracking_state = slam_ ? static_cast<int>(slam_->GetTrackingState()) : -1;
+            size_t n_mp = 0, n_hq = 0;
+            if (slam_) {
+                auto* pMap = slam_->GetMainMap();
+                if (pMap) {
+                    n_mp = pMap->GetAllMapPoints().size();
+                    n_hq = static_cast<size_t>(pMap->GetSizeHighQualityMapPoints());
+                }
+            }
+            size_t q_depth = 0;
+            { std::lock_guard<std::mutex> lk(import_queue_mtx_); q_depth = import_queue_.size(); }
+
+            m.data = {
+                last_track_ms_,
+                static_cast<double>(tracking_state),
+                static_cast<double>(n_mp),
+                static_cast<double>(n_hq),
+                static_cast<double>(q_depth),
+                static_cast<double>(publishedCount_.load()),
+                static_cast<double>(importedCount_.load()),
+            };
+            slam_metrics_pub_->publish(m);
+        }
     }
 
     orbslam2_msgs::msg::MapPoint toMsg(ORB_SLAM3::MapPoint* pMP) {
@@ -980,6 +1028,7 @@ private:
     std::atomic<uint64_t> publishedCount_{0};
     std::atomic<uint64_t> receivedCount_{0};
     std::atomic<uint64_t> importedCount_{0};
+    double last_track_ms_ = 0.0;
 
     std::unique_ptr<ORB_SLAM3::System> slam_;
     nav_msgs::msg::Path path_msg_;
@@ -1022,8 +1071,10 @@ public:
 private:
 
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
-    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr image_plane_pub_;
+    // image_plane_pub_ commented out — see publisher creation and publish block
+    // rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr image_plane_pub_;
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr slam_metrics_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr hq_pointcloud_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr merged_map_pub_;

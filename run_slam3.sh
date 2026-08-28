@@ -19,6 +19,8 @@
 
 SAVE_KEYFRAMES=false
 MA_METHOD="hq-mpshare"
+MONITOR=false
+MONITOR_RATE=2.0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --save|--save-keyframes|save|yes|true)
@@ -29,9 +31,18 @@ while [[ $# -gt 0 ]]; do
             MA_METHOD="$2"
             shift 2
             ;;
+        --monitor)
+            MONITOR=true
+            shift
+            ;;
+        --monitor-rate)
+            MONITOR_RATE="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown argument: $1"
             echo "Usage: ./run_slam3.sh [--save] [--method hq-mpshare|new]"
+            echo "                      [--monitor] [--monitor-rate HZ]"
             exit 1
             ;;
     esac
@@ -52,6 +63,7 @@ else
     echo "Keyframe saving: disabled"
 fi
 echo "MA method: $MA_METHOD"
+echo "Jetson monitor: $MONITOR (${MONITOR_RATE} Hz)"
 
 colcon build --packages-select orb_slam3 --cmake-clean-cache
 source install/setup.bash
@@ -64,6 +76,8 @@ LAUNCH_ARGS=(
     settings_file:="$REALSENSE3_CONFIG"
     save_keyframes:="$SAVE_KEYFRAMES"
     ma_method:="$MA_METHOD"
+    monitor:="$MONITOR"
+    monitor_rate_hz:="$MONITOR_RATE"
 )
 if [ -n "$RESULT_DIR" ]; then
     LAUNCH_ARGS+=(result_dir:="$RESULT_DIR")

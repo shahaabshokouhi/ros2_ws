@@ -39,4 +39,10 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
 )
 
+install(PROGRAMS
+  jetracer/jetson_monitor.py
+  RENAME jetson_monitor
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()

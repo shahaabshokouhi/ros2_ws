@@ -50,6 +50,17 @@ def generate_launch_description():
             default_value='hq-mpshare',
             description='Multi-agent method: hq-mpshare (map point sharing) or new (BoW sharing)'
         ),
+        DeclareLaunchArgument(
+            'monitor',
+            default_value='true',
+            description='Launch the Jetson hardware monitor node '
+                        '(publishes /<agent>/jetson/metrics at monitor_rate_hz)'
+        ),
+        DeclareLaunchArgument(
+            'monitor_rate_hz',
+            default_value='2.0',
+            description='Rate at which jetson_monitor publishes hardware metrics (Hz)'
+        ),
         OpaqueFunction(function=launch_nodes),
     ])
 
@@ -59,10 +70,13 @@ def launch_nodes(context):
     settings     = LaunchConfiguration('settings_file').perform(context)
     save_kf_str  = LaunchConfiguration('save_keyframes').perform(context)
     result_dir   = LaunchConfiguration('result_dir').perform(context)
-    save_keyframes = save_kf_str.strip().lower() in ('true', '1', 'yes', 'on')
+    save_keyframes  = save_kf_str.strip().lower() in ('true', '1', 'yes', 'on')
     tracking_cpu    = int(LaunchConfiguration('tracking_cpu').perform(context))
     tracking_rtprio = int(LaunchConfiguration('tracking_rtprio').perform(context))
     ma_method       = LaunchConfiguration('ma_method').perform(context)
+    monitor_str     = LaunchConfiguration('monitor').perform(context)
+    launch_monitor  = monitor_str.strip().lower() in ('true', '1', 'yes', 'on')
+    monitor_rate    = float(LaunchConfiguration('monitor_rate_hz').perform(context))
 
     def tgt(suffix: str) -> str:
         # build "/<agent>/<suffix>"
@@ -151,4 +165,19 @@ def launch_nodes(context):
         ],
     )
 
-    return [realsense_node, slam_node]
+    nodes = [realsense_node, slam_node]
+
+    if launch_monitor:
+        monitor_node = Node(
+            package='jetracer',
+            executable='jetson_monitor',
+            name=f'{agent}_jetson_monitor',
+            output='screen',
+            parameters=[{
+                'agent_name': agent,
+                'rate_hz': monitor_rate,
+            }],
+        )
+        nodes.append(monitor_node)
+
+    return nodes
