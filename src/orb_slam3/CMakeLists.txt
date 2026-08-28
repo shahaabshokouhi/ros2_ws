@@ -81,6 +81,32 @@ link_directories(
 # ========== ROS 2 Node ==========
 add_executable(orb_slam3_node src/orb_slam3_node.cpp)
 
+# CRITICAL Eigen allocator ABI MATCH (permanent — do NOT remove with the
+# diagnostics below). Root cause of the receive-path heap-buffer-overflow found
+# via AddressSanitizer:
+#
+# The ORB_SLAM3 library builds with -std=c++14, so EIGEN_HAS_CXX17_OVERALIGN=0
+# and EIGEN_MAKE_ALIGNED_OPERATOR_NEW gives MapPoint a *custom* Eigen operator
+# new/delete (Eigen's "handmade" over-aligned allocator, which stores the real
+# pointer 8 bytes before the data). This node builds with -std=c++17, where
+# EIGEN_HAS_CXX17_OVERALIGN=1 makes that macro EMPTY, so MapPoint uses the plain
+# GLOBAL operator new/delete (no header).
+#
+# The node allocates foreign MapPoints (stageImportedPoint) that the library
+# later deletes (ImportHighQualityMapPoints). Node's plain new writes no header;
+# library's handmade delete reads one -> read 8 bytes before the block ->
+# heap corruption / wild free. (Only bites where EIGEN_MAX_ALIGN_BYTES>16, i.e.
+# x86 AVX via -march=native; on the align-16 Jetsons both sides take Eigen's
+# plain malloc/free path, which is why the robots never crashed.)
+#
+# Fix: make this node use the SAME Eigen allocator ABI as the c++14 library:
+#   * -DEIGEN_HAS_CXX17_OVERALIGN=0  -> MapPoint gets the custom handmade new/delete
+#   * -march=native                  -> same EIGEN_MAX_ALIGN_BYTES -> same handmade branch
+# The node and library are always built together on one machine, so -march=native
+# yields the same alignment on both (x86 and Jetson alike).
+target_compile_options(orb_slam3_node PRIVATE -march=native)
+target_compile_definitions(orb_slam3_node PRIVATE EIGEN_HAS_CXX17_OVERALIGN=0)
+
 ament_target_dependencies(
   orb_slam3_node
   rclcpp
