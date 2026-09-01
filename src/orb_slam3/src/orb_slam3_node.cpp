@@ -28,6 +28,8 @@
 #include <nav_msgs/msg/path.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
+#include <sensor_msgs/msg/imu.hpp>
+#include "ImuTypes.h"
 #include <std_msgs/msg/float64_multi_array.hpp>
 #include <std_msgs/msg/multi_array_dimension.hpp>
 
@@ -44,6 +46,7 @@
 #include <unordered_map>
 #include <mutex>
 #include <queue>
+#include <deque>
 #include <thread>
 #include <condition_variable>
 #include <filesystem>
@@ -81,11 +84,39 @@ public:
             ma_method_ = this->declare_parameter<std::string>("ma_method", "hq-mpshare");
             const std::string color_topic = std::string("/") + agent_name_ + std::string("/camera/realsense2_camera/color/image_raw");
             const std::string depth_topic = std::string("/") + agent_name_ + std::string("/camera/realsense2_camera/depth/image_rect_raw");
+            const std::string imu_topic   = std::string("/") + agent_name_ + std::string("/camera/realsense2_camera/imu");
+
+            // --- RGBD-Inertial vs plain RGBD -----------------------------------
+            // use_imu param: "auto" (default) uses IMU iff the settings file has
+            // IMU calibration (IMU.T_b_c1); "true"/"false" force it. IMU requires
+            // that calibration, so gating on it makes "auto" deterministic and
+            // safe — a camera/settings without IMU calibration runs plain RGBD
+            // exactly as before.
+            // Default "false" (plain RGBD). Opt into inertial with use_imu:=true
+            // (or run_slam3.sh --imu); "auto" enables IMU iff settings have
+            // IMU.T_b_c1. Default is visual-only because inertial init drifts when
+            // the camera sits still.
+            const std::string use_imu_param = this->declare_parameter<std::string>("use_imu", "false");
+            bool settings_have_imu = false;
+            {
+                cv::FileStorage fs_imu(settings_file, cv::FileStorage::READ);
+                settings_have_imu = fs_imu.isOpened() && !fs_imu["IMU.T_b_c1"].empty();
+            }
+            if (use_imu_param == "true")       use_imu_ = settings_have_imu;
+            else if (use_imu_param == "false") use_imu_ = false;
+            else /* auto */                    use_imu_ = settings_have_imu;
+
+            if (use_imu_param == "true" && !settings_have_imu)
+                RCLCPP_WARN(this->get_logger(),
+                    "use_imu:=true but settings '%s' has no IMU.T_b_c1 calibration; "
+                    "falling back to plain RGBD.", settings_file.c_str());
+            RCLCPP_INFO(this->get_logger(), "SLAM sensor mode: %s",
+                        use_imu_ ? "RGBD-Inertial (IMU_RGBD)" : "RGBD");
 
             slam_ = std::make_unique<ORB_SLAM3::System>(
                 vocab_file,
                 settings_file,
-                ORB_SLAM3::System::RGBD,
+                use_imu_ ? ORB_SLAM3::System::IMU_RGBD : ORB_SLAM3::System::RGBD,
                 /*bUseViewer=*/false,
                 /*initFr=*/0,
                 /*strSequence=*/std::string(),
@@ -180,6 +211,17 @@ public:
             sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(10), color_sub_, depth_sub_);
             sync_->registerCallback(std::bind(&ORBSLAM3Node::syncCallback, this, std::placeholders::_1, std::placeholders::_2));
 
+            // IMU stream (RGBD-Inertial only). SensorDataQoS gives a deep,
+            // best-effort queue so 200 Hz samples are not dropped while the
+            // tracking thread is busy. Buffered here (default callback group /
+            // aux executor) and drained per-frame in syncCallback. Requires the
+            // launch to enable the united /imu topic (unite_imu_method).
+            if (use_imu_) {
+                imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
+                    imu_topic, rclcpp::SensorDataQoS(),
+                    std::bind(&ORBSLAM3Node::imuCallback, this, std::placeholders::_1));
+            }
+
             // fx_/expected_width_ are set above, so the dataset (and its
             // metadata.json intrinsics) can be created now.
             if (save_keyframes_) {
@@ -196,6 +238,29 @@ private:
         cv::FileNode n = fs[primary];
         if (!n.empty()) return (float)n;
         return (float)fs[fallback];
+    }
+
+    // Buffer one IMU sample. The united /imu message carries both accelerometer
+    // (linear_acceleration) and gyroscope (angular_velocity) for one timestamp.
+    void imuCallback(const sensor_msgs::msg::Imu::ConstSharedPtr& msg) {
+        ORB_SLAM3::IMU::Point p(
+            msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z,
+            msg->angular_velocity.x,    msg->angular_velocity.y,    msg->angular_velocity.z,
+            rclcpp::Time(msg->header.stamp).seconds());
+        std::lock_guard<std::mutex> lk(imu_mutex_);
+        imu_buffer_.push_back(p);
+    }
+
+    // Pop all buffered IMU samples up to (and including) the frame timestamp.
+    // ORB-SLAM3 expects the measurements between the previous and current image.
+    std::vector<ORB_SLAM3::IMU::Point> drainImuUpTo(double frame_time) {
+        std::vector<ORB_SLAM3::IMU::Point> out;
+        std::lock_guard<std::mutex> lk(imu_mutex_);
+        while (!imu_buffer_.empty() && imu_buffer_.front().t <= frame_time) {
+            out.push_back(imu_buffer_.front());
+            imu_buffer_.pop_front();
+        }
+        return out;
     }
 
     void syncCallback(const sensor_msgs::msg::Image::ConstSharedPtr& color_msg,
@@ -262,7 +327,13 @@ private:
 
             try {
                 const auto t0 = std::chrono::steady_clock::now();
-                Tcw = slam_->TrackRGBD(bgr_image, depth_normalized, timestamp);
+                if (use_imu_) {
+                    // IMU samples accumulated since the previous frame.
+                    std::vector<ORB_SLAM3::IMU::Point> vImuMeas = drainImuUpTo(timestamp);
+                    Tcw = slam_->TrackRGBD(bgr_image, depth_normalized, timestamp, vImuMeas);
+                } else {
+                    Tcw = slam_->TrackRGBD(bgr_image, depth_normalized, timestamp);
+                }
                 last_track_ms_ = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
                 trackingOk = (slam_->GetTrackingState() == ORB_SLAM3::Tracking::OK);
@@ -1090,6 +1161,12 @@ private:
     rclcpp::Publisher<orbslam2_msgs::msg::KeyFrameBoW>::SharedPtr kf_bow_pub_;
     rclcpp::Subscription<orbslam2_msgs::msg::KeyFrameBoW>::SharedPtr kf_bow_sub_;
     std::string ma_method_;
+
+    // RGBD-Inertial support (only active when use_imu_)
+    bool use_imu_ = false;
+    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
+    std::deque<ORB_SLAM3::IMU::Point> imu_buffer_;
+    std::mutex imu_mutex_;
 
     using SyncPolicy = message_filters::sync_policies::ApproximateTime<
         sensor_msgs::msg::Image, sensor_msgs::msg::Image>;

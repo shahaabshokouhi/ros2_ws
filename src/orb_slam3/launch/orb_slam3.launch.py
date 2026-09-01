@@ -51,6 +51,14 @@ def generate_launch_description():
             description='Multi-agent method: hq-mpshare (map point sharing) or new (BoW sharing)'
         ),
         DeclareLaunchArgument(
+            'use_imu',
+            default_value='false',
+            description='RGBD-Inertial: false (DEFAULT, plain RGBD), true (force), or '
+                        'auto (use IMU iff the settings file has IMU.T_b_c1). Default is '
+                        'visual-only because inertial init drifts when stationary. When '
+                        'not false, the RealSense driver publishes a united /imu topic.'
+        ),
+        DeclareLaunchArgument(
             'monitor',
             default_value='true',
             description='Launch the Jetson hardware monitor node '
@@ -74,6 +82,8 @@ def launch_nodes(context):
     tracking_cpu    = int(LaunchConfiguration('tracking_cpu').perform(context))
     tracking_rtprio = int(LaunchConfiguration('tracking_rtprio').perform(context))
     ma_method       = LaunchConfiguration('ma_method').perform(context)
+    use_imu         = LaunchConfiguration('use_imu').perform(context)
+    enable_imu      = use_imu.strip().lower() != 'false'
     monitor_str     = LaunchConfiguration('monitor').perform(context)
     launch_monitor  = monitor_str.strip().lower() in ('true', '1', 'yes', 'on')
     monitor_rate    = float(LaunchConfiguration('monitor_rate_hz').perform(context))
@@ -91,6 +101,19 @@ def launch_nodes(context):
         ('/camera/realsense2_camera/aligned_depth_to_color/image_raw',
          tgt('camera/realsense2_camera/depth/image_rect_raw')),
     ]
+    if enable_imu:
+        # United accel+gyro stream the SLAM node subscribes to for IMU_RGBD.
+        rs_remaps.append(('/camera/realsense2_camera/imu',
+                          tgt('camera/realsense2_camera/imu')))
+
+    # IMU streams for RGBD-Inertial. unite_imu_method=2 (linear interpolation)
+    # makes the driver publish a single combined /imu topic (accel+gyro per
+    # message), which the SLAM node subscribes to. Empty dict => no IMU streams.
+    imu_params = {
+        'enable_gyro': True,
+        'enable_accel': True,
+        'unite_imu_method': 2,
+    } if enable_imu else {}
 
     realsense_node = Node(
         package='realsense2_camera',
@@ -143,6 +166,7 @@ def launch_nodes(context):
             # 'rgb_camera.gain': 64,
 
             'publish_tf': False,
+            **imu_params,
         }],
         remappings=rs_remaps,
     )
@@ -162,6 +186,7 @@ def launch_nodes(context):
             {'tracking_cpu': tracking_cpu},
             {'tracking_rtprio': tracking_rtprio},
             {'ma_method': ma_method},
+            {'use_imu': use_imu},
         ],
     )
 

@@ -21,6 +21,11 @@ SAVE_KEYFRAMES=false
 MA_METHOD="hq-mpshare"
 MONITOR=false
 MONITOR_RATE=2.0
+# IMU / RGBD-Inertial mode:
+#   false (DEFAULT) -> plain RGBD (visual-only; no inertial-init stationary drift)
+#   true            -> force RGBD-Inertial (--imu)
+#   auto            -> use IMU iff the settings file has IMU.T_b_c1 calibration (--imu-auto)
+USE_IMU="false"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --save|--save-keyframes|save|yes|true)
@@ -30,6 +35,18 @@ while [[ $# -gt 0 ]]; do
         --method)
             MA_METHOD="$2"
             shift 2
+            ;;
+        --imu)
+            USE_IMU=true
+            shift
+            ;;
+        --imu-auto)
+            USE_IMU=auto
+            shift
+            ;;
+        --no-imu)
+            USE_IMU=false
+            shift
             ;;
         --monitor)
             MONITOR=true
@@ -41,7 +58,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "Unknown argument: $1"
-            echo "Usage: ./run_slam3.sh [--save] [--method hq-mpshare|new]"
+            echo "Usage: ./run_slam3.sh [--save] [--method hq-mpshare|new] [--imu|--imu-auto|--no-imu]"
             echo "                      [--monitor] [--monitor-rate HZ]"
             exit 1
             ;;
@@ -63,6 +80,7 @@ else
     echo "Keyframe saving: disabled"
 fi
 echo "MA method: $MA_METHOD"
+echo "IMU mode: $USE_IMU"
 echo "Jetson monitor: $MONITOR (${MONITOR_RATE} Hz)"
 
 colcon build --packages-select orb_slam3 --cmake-clean-cache
@@ -76,6 +94,7 @@ LAUNCH_ARGS=(
     settings_file:="$REALSENSE3_CONFIG"
     save_keyframes:="$SAVE_KEYFRAMES"
     ma_method:="$MA_METHOD"
+    use_imu:="$USE_IMU"
     monitor:="$MONITOR"
     monitor_rate_hz:="$MONITOR_RATE"
 )
