@@ -36,6 +36,9 @@
 #include <orbslam2_msgs/msg/map_point.hpp>
 #include <orbslam2_msgs/msg/map_point_array.hpp>
 #include <orbslam2_msgs/msg/key_frame_bo_w.hpp>
+#include <orbslam2_msgs/msg/agent_request.hpp>
+#include <orbslam2_msgs/msg/camera_calib.hpp>
+#include <orbslam2_msgs/msg/key_frame_data.hpp>
 
 #include <MapPoint.h>
 #include <System.h>
@@ -153,6 +156,15 @@ public:
                 "orb_slam2/single_mappoint", qos);
             kf_bow_pub_ = this->create_publisher<orbslam2_msgs::msg::KeyFrameBoW>(
                 "orb_slam2/kf_bow", qos);
+            // On-demand KF exchange ("new" method). Global topics so every
+            // agent both requests and answers — distributed & symmetric.
+            // `qos` is reliable + deep, so requests/replies are not dropped.
+            agent_req_pub_ = this->create_publisher<orbslam2_msgs::msg::AgentRequest>(
+                "orb_slam2/agent_request", qos);
+            calib_pub_ = this->create_publisher<orbslam2_msgs::msg::CameraCalib>(
+                "orb_slam2/camera_calib", qos);
+            kf_data_pub_ = this->create_publisher<orbslam2_msgs::msg::KeyFrameData>(
+                "orb_slam2/kf_data", qos);
             path_pub_ = this->create_publisher<nav_msgs::msg::Path>(
                 agent_name_ + "/orb_slam3/path", 10);
             // image_plane_pub_ disabled — image-plane point-cloud publishing
@@ -199,6 +211,15 @@ public:
             kf_bow_sub_ = this->create_subscription<orbslam2_msgs::msg::KeyFrameBoW>(
                 "/orb_slam2/kf_bow", qos,
                 std::bind(&ORBSLAM3Node::importKeyFrameBoWCallback, this, _1));
+            agent_req_sub_ = this->create_subscription<orbslam2_msgs::msg::AgentRequest>(
+                "/orb_slam2/agent_request", qos,
+                std::bind(&ORBSLAM3Node::agentRequestCallback, this, _1));
+            calib_sub_ = this->create_subscription<orbslam2_msgs::msg::CameraCalib>(
+                "/orb_slam2/camera_calib", qos,
+                std::bind(&ORBSLAM3Node::cameraCalibCallback, this, _1));
+            kf_data_sub_ = this->create_subscription<orbslam2_msgs::msg::KeyFrameData>(
+                "/orb_slam2/kf_data", qos,
+                std::bind(&ORBSLAM3Node::keyFrameDataCallback, this, _1));
 
             // Background worker thread: processes ImportHighQualityMapPoints
             // batches so the ROS callback thread is never blocked.
@@ -681,6 +702,21 @@ private:
                 }
                 kf_bow_pub_->publish(msg);
             }
+
+            // Publish whatever the MA thread queued this cycle (calibration
+            // pulls and full-KF pulls share one message type).
+            for (const auto& r : slam_->mpMA->GetPendingRequests()) {
+                orbslam2_msgs::msg::AgentRequest req;
+                req.request_type =
+                    (r.type == ORB_SLAM3::MultiAgentManager::PendingRequest::Calibration)
+                        ? orbslam2_msgs::msg::AgentRequest::CALIBRATION
+                        : orbslam2_msgs::msg::AgentRequest::KEYFRAME;
+                req.requester_agent = agent_name_;
+                req.target_agent    = r.target_agent;
+                req.keyframe_id     = r.kf_id;
+                req.stamp           = now;
+                agent_req_pub_->publish(req);
+            }
         }
     }
 
@@ -749,6 +785,122 @@ private:
         if (slam_ && slam_->mpMA) {
             slam_->mpMA->ImportKeyFrameBoW(msg->agent_name, msg->keyframe_id, bow);
         }
+    }
+
+    // A peer asked us for something. One entry point for every request type;
+    // the same code runs on every agent, so the protocol is symmetric.
+    void agentRequestCallback(const orbslam2_msgs::msg::AgentRequest::SharedPtr msg)
+    {
+        if (msg->target_agent != agent_name_) return;   // not for us
+        if (!slam_ || !slam_->mpMA) return;
+
+        if (msg->request_type == orbslam2_msgs::msg::AgentRequest::CALIBRATION) {
+            ORB_SLAM3::MultiAgentManager::AgentCalib c;
+            if (!slam_->mpMA->GetOwnCalib(c)) return;   // no keyframes yet
+
+            orbslam2_msgs::msg::CameraCalib out;
+            out.source_agent   = agent_name_;
+            out.model_type     = static_cast<uint8_t>(c.model_type);
+            out.intrinsics     = c.intrinsics;
+            out.bf             = c.bf;
+            out.th_depth       = c.th_depth;
+            out.width          = c.width;
+            out.height         = c.height;
+            out.n_scale_levels = c.n_scale_levels;
+            out.scale_factor   = c.scale_factor;
+            out.stamp          = this->now();
+            calib_pub_->publish(out);
+            RCLCPP_INFO(this->get_logger(),
+                "[kf-share] sent calibration to %s", msg->requester_agent.c_str());
+            return;
+        }
+
+        if (msg->request_type == orbslam2_msgs::msg::AgentRequest::KEYFRAME) {
+            ORB_SLAM3::MultiAgentManager::ForeignKeyFrame kf;
+            if (!slam_->mpMA->GetOwnKeyFrameFeatures(msg->keyframe_id, kf)) {
+                RCLCPP_WARN(this->get_logger(),
+                    "[kf-share] KF %lu requested by %s not available",
+                    (unsigned long)msg->keyframe_id, msg->requester_agent.c_str());
+                return;
+            }
+
+            const size_t N = kf.u.size();
+            orbslam2_msgs::msg::KeyFrameData out;
+            out.source_agent    = agent_name_;
+            out.requester_agent = msg->requester_agent;
+            out.keyframe_id     = msg->keyframe_id;
+            out.num_keypoints   = static_cast<uint32_t>(N);
+            out.kp_u            = kf.u;
+            out.kp_v            = kf.v;
+            out.kp_octave       = kf.octave;
+            out.kp_depth        = kf.depth;
+            out.descriptors.resize(N * 32);
+            for (size_t i = 0; i < N; ++i)
+                std::memcpy(&out.descriptors[i * 32],
+                            kf.descriptors.ptr<uint8_t>((int)i), 32);
+            out.stamp = this->now();
+            kf_data_pub_->publish(out);
+            RCLCPP_INFO(this->get_logger(),
+                "[kf-share] sent KF %lu (%zu keypoints) to %s",
+                (unsigned long)msg->keyframe_id, N, msg->requester_agent.c_str());
+        }
+    }
+
+    // Calibration is broadcast, not addressed: every agent caches every peer's
+    // config, so one agent's request also serves the others.
+    void cameraCalibCallback(const orbslam2_msgs::msg::CameraCalib::SharedPtr msg)
+    {
+        if (msg->source_agent == agent_name_) return;   // our own echo
+        if (!slam_ || !slam_->mpMA) return;
+
+        ORB_SLAM3::MultiAgentManager::AgentCalib c;
+        c.model_type     = static_cast<int>(msg->model_type);
+        c.intrinsics     = msg->intrinsics;
+        c.bf             = msg->bf;
+        c.th_depth       = msg->th_depth;
+        c.width          = msg->width;
+        c.height         = msg->height;
+        c.n_scale_levels = msg->n_scale_levels;
+        c.scale_factor   = msg->scale_factor;
+        c.valid          = !c.intrinsics.empty();
+        slam_->mpMA->ImportAgentCalib(msg->source_agent, c);
+        RCLCPP_INFO(this->get_logger(),
+            "[kf-share] cached calibration of %s (model=%d, %zu params)",
+            msg->source_agent.c_str(), c.model_type, c.intrinsics.size());
+    }
+
+    // A peer replied with a full keyframe. If it's addressed to us, stage it
+    // for tracking against our own map.
+    void keyFrameDataCallback(const orbslam2_msgs::msg::KeyFrameData::SharedPtr msg)
+    {
+        if (msg->requester_agent != agent_name_) return;  // not our reply
+        if (msg->source_agent == agent_name_) return;     // ignore our own echo
+        if (!slam_ || !slam_->mpMA) return;
+
+        const size_t N = msg->num_keypoints;
+        if (N == 0 || msg->kp_u.size() != N || msg->kp_v.size() != N ||
+            msg->kp_octave.size() != N || msg->kp_depth.size() != N ||
+            msg->descriptors.size() != N * 32) {
+            RCLCPP_WARN(this->get_logger(),
+                "[kf-share] malformed KF %lu from %s (N=%zu); dropping",
+                (unsigned long)msg->keyframe_id, msg->source_agent.c_str(), N);
+            return;
+        }
+
+        ORB_SLAM3::MultiAgentManager::ForeignKeyFrame kf;
+        kf.source_agent = msg->source_agent;
+        kf.kf_id        = msg->keyframe_id;
+        kf.u            = msg->kp_u;
+        kf.v            = msg->kp_v;
+        kf.depth        = msg->kp_depth;
+        kf.octave       = msg->kp_octave;
+        kf.descriptors  = cv::Mat((int)N, 32, CV_8U);
+        std::memcpy(kf.descriptors.data, msg->descriptors.data(), N * 32);
+
+        slam_->mpMA->ImportForeignKeyFrame(kf);
+        RCLCPP_INFO(this->get_logger(),
+            "[kf-share] received KF %lu (%zu keypoints) from %s",
+            (unsigned long)msg->keyframe_id, N, msg->source_agent.c_str());
     }
 
     void importWorkerLoop() {
@@ -1160,6 +1312,13 @@ private:
     rclcpp::Subscription<orbslam2_msgs::msg::MapPointArray>::SharedPtr mappoint_array_sub_;
     rclcpp::Publisher<orbslam2_msgs::msg::KeyFrameBoW>::SharedPtr kf_bow_pub_;
     rclcpp::Subscription<orbslam2_msgs::msg::KeyFrameBoW>::SharedPtr kf_bow_sub_;
+    // KF-sharing ("new" method): unified request + calibration + full-KF reply
+    rclcpp::Publisher<orbslam2_msgs::msg::AgentRequest>::SharedPtr agent_req_pub_;
+    rclcpp::Subscription<orbslam2_msgs::msg::AgentRequest>::SharedPtr agent_req_sub_;
+    rclcpp::Publisher<orbslam2_msgs::msg::CameraCalib>::SharedPtr calib_pub_;
+    rclcpp::Subscription<orbslam2_msgs::msg::CameraCalib>::SharedPtr calib_sub_;
+    rclcpp::Publisher<orbslam2_msgs::msg::KeyFrameData>::SharedPtr kf_data_pub_;
+    rclcpp::Subscription<orbslam2_msgs::msg::KeyFrameData>::SharedPtr kf_data_sub_;
     std::string ma_method_;
 
     // RGBD-Inertial support (only active when use_imu_)
