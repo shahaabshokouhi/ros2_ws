@@ -704,6 +704,7 @@ private:
                 msg.agent_name = agent_name_;
                 msg.stamp = now;
 
+                msg.bow_min_score = entry.min_score;
                 msg.word_ids.reserve(entry.bow.size());
                 msg.word_values.reserve(entry.bow.size());
                 for (const auto& [wordId, wordVal] : entry.bow) {
@@ -793,7 +794,8 @@ private:
             bow.addWeight(msg->word_ids[i], msg->word_values[i]);
         }
         if (slam_ && slam_->mpMA) {
-            slam_->mpMA->ImportKeyFrameBoW(msg->agent_name, msg->keyframe_id, bow);
+            slam_->mpMA->ImportKeyFrameBoW(msg->agent_name, msg->keyframe_id, bow,
+                                           msg->bow_min_score);
         }
     }
 
