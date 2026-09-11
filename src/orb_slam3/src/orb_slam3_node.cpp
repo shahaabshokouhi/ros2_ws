@@ -85,6 +85,16 @@ public:
 
             agent_name_ = this->get_name();
             ma_method_ = this->declare_parameter<std::string>("ma_method", "hq-mpshare");
+            // The two multi-agent methods share different things, and sharing
+            // both at once is not just wasted bandwidth: ImportHighQualityMapPoints
+            // maintains its own per-keyframe HQ-BoW for the hq-mpshare matcher,
+            // so streaming map points while running "new" also churns state the
+            // KF-sharing matcher has no use for. Map points are therefore only
+            // published for hq-mpshare; "new" shares BoWs and full keyframes.
+            if (ma_method_ == "new") {
+                publish_mappoints = false;
+                publish_single_mappoint = false;
+            }
             const std::string color_topic = std::string("/") + agent_name_ + std::string("/camera/realsense2_camera/color/image_raw");
             const std::string depth_topic = std::string("/") + agent_name_ + std::string("/camera/realsense2_camera/depth/image_rect_raw");
             const std::string imu_topic   = std::string("/") + agent_name_ + std::string("/camera/realsense2_camera/imu");
