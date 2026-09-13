@@ -36,6 +36,9 @@
 #include <orbslam2_msgs/msg/map_point.hpp>
 #include <orbslam2_msgs/msg/map_point_array.hpp>
 #include <orbslam2_msgs/msg/key_frame_bo_w.hpp>
+#include <execinfo.h>
+#include <csignal>
+#include <unistd.h>
 #include <orbslam2_msgs/msg/agent_request.hpp>
 #include <orbslam2_msgs/msg/camera_calib.hpp>
 #include <orbslam2_msgs/msg/key_frame_data.hpp>
@@ -1426,7 +1429,37 @@ static void configureTrackingThread(const std::shared_ptr<ORBSLAM3Node>& node) {
     }
 }
 
+// ── Crash backtrace ─────────────────────────────────────────────────────
+// The KF-sharing fusion path writes into the map from the MA thread, and a
+// fault there surfaces as a bare "process has died ... exit code -11" from the
+// launcher with nothing to go on. Print a symbolised stack straight to fd 2 so
+// the trace lands in the launch log beside the SLAM output.
+//
+// Async-signal-safe only: backtrace() and backtrace_symbols_fd() are, printf
+// and friends are not, so nothing else is called here. The handler then resets
+// to the default and re-raises, so the exit status still reflects the real
+// fault and a core file is still written.
+extern "C" void orbslam3_crash_handler(int sig)
+{
+    static const char msg[] = "\n*** CRASH: fatal signal, backtrace follows ***\n";
+    ssize_t rc = write(STDERR_FILENO, msg, sizeof(msg) - 1);
+    (void)rc;
+
+    void* frames[64];
+    const int n = backtrace(frames, 64);
+    backtrace_symbols_fd(frames, n, STDERR_FILENO);
+
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
 int main(int argc, char** argv) {
+    // Installed first so even an early fault is captured.
+    signal(SIGSEGV, orbslam3_crash_handler);
+    signal(SIGABRT, orbslam3_crash_handler);
+    signal(SIGBUS,  orbslam3_crash_handler);
+    signal(SIGFPE,  orbslam3_crash_handler);
+
     rclcpp::init(argc, argv);
     auto node = std::make_shared<ORBSLAM3Node>(rclcpp::NodeOptions());
 

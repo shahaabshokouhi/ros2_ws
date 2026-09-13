@@ -107,6 +107,13 @@ add_executable(orb_slam3_node src/orb_slam3_node.cpp)
 target_compile_options(orb_slam3_node PRIVATE -march=native)
 target_compile_definitions(orb_slam3_node PRIVATE EIGEN_HAS_CXX17_OVERALIGN=0)
 
+# Crash backtraces: without -rdynamic, backtrace_symbols_fd() prints bare
+# addresses instead of function names, which makes the handler in
+# orb_slam3_node.cpp nearly useless. -g keeps line info so addr2line can turn
+# an address into file:line afterwards. Neither affects optimisation.
+target_compile_options(orb_slam3_node PRIVATE -g)
+target_link_options(orb_slam3_node PRIVATE -rdynamic)
+
 ament_target_dependencies(
   orb_slam3_node
   rclcpp
