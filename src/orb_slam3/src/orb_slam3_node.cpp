@@ -853,6 +853,24 @@ private:
             for (size_t i = 0; i < N; ++i)
                 std::memcpy(&out.descriptors[i * 32],
                             kf.descriptors.ptr<uint8_t>((int)i), 32);
+
+            // Our own pose for this keyframe, so the receiver can later check
+            // whether several inter-agent matches agree with each other.
+            out.has_pose = kf.has_pose;
+            if (kf.has_pose) {
+                Eigen::Matrix3f R;
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c)
+                        R(r,c) = kf.foreignTcw.at<float>(r,c);
+                Eigen::Quaternionf q(R); q.normalize();
+                out.pose.translation.x = kf.foreignTcw.at<float>(0,3);
+                out.pose.translation.y = kf.foreignTcw.at<float>(1,3);
+                out.pose.translation.z = kf.foreignTcw.at<float>(2,3);
+                out.pose.rotation.x = q.x();
+                out.pose.rotation.y = q.y();
+                out.pose.rotation.z = q.z();
+                out.pose.rotation.w = q.w();
+            }
             out.stamp = this->now();
             kf_data_pub_->publish(out);
             RCLCPP_INFO(this->get_logger(),
@@ -911,6 +929,21 @@ private:
         kf.octave       = msg->kp_octave;
         kf.descriptors  = cv::Mat((int)N, 32, CV_8U);
         std::memcpy(kf.descriptors.data, msg->descriptors.data(), N * 32);
+
+        kf.has_pose = msg->has_pose;
+        if (msg->has_pose) {
+            Eigen::Quaternionf q(msg->pose.rotation.w, msg->pose.rotation.x,
+                                 msg->pose.rotation.y, msg->pose.rotation.z);
+            q.normalize();
+            const Eigen::Matrix3f R = q.toRotationMatrix();
+            kf.foreignTcw = cv::Mat::eye(4, 4, CV_32F);
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    kf.foreignTcw.at<float>(r,c) = R(r,c);
+            kf.foreignTcw.at<float>(0,3) = msg->pose.translation.x;
+            kf.foreignTcw.at<float>(1,3) = msg->pose.translation.y;
+            kf.foreignTcw.at<float>(2,3) = msg->pose.translation.z;
+        }
 
         slam_->mpMA->ImportForeignKeyFrame(kf);
         RCLCPP_INFO(this->get_logger(),
