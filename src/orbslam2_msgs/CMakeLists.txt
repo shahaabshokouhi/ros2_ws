@@ -15,6 +15,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/AgentRequest.msg"
   "msg/CameraCalib.msg"
   "msg/KeyFrameData.msg"
+  "msg/OwnerUpdate.msg"
+  "msg/BackObservations.msg"
   DEPENDENCIES builtin_interfaces geometry_msgs std_msgs
 )
 

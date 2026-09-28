@@ -42,6 +42,8 @@
 #include <orbslam2_msgs/msg/agent_request.hpp>
 #include <orbslam2_msgs/msg/camera_calib.hpp>
 #include <orbslam2_msgs/msg/key_frame_data.hpp>
+#include <orbslam2_msgs/msg/owner_update.hpp>
+#include <orbslam2_msgs/msg/back_observations.hpp>
 
 #include <MapPoint.h>
 #include <System.h>
@@ -178,6 +180,12 @@ public:
                 "orb_slam2/camera_calib", qos);
             kf_data_pub_ = this->create_publisher<orbslam2_msgs::msg::KeyFrameData>(
                 "orb_slam2/kf_data", qos);
+            // Ownership ("new" method): owners broadcast what moved; copy
+            // holders send their sightings of an owner's landmarks back to it.
+            owner_update_pub_ = this->create_publisher<orbslam2_msgs::msg::OwnerUpdate>(
+                "orb_slam2/owner_update", qos);
+            back_obs_pub_ = this->create_publisher<orbslam2_msgs::msg::BackObservations>(
+                "orb_slam2/back_observations", qos);
             path_pub_ = this->create_publisher<nav_msgs::msg::Path>(
                 agent_name_ + "/orb_slam3/path", 10);
             // image_plane_pub_ disabled — image-plane point-cloud publishing
@@ -233,6 +241,12 @@ public:
             kf_data_sub_ = this->create_subscription<orbslam2_msgs::msg::KeyFrameData>(
                 "/orb_slam2/kf_data", qos,
                 std::bind(&ORBSLAM3Node::keyFrameDataCallback, this, _1));
+            owner_update_sub_ = this->create_subscription<orbslam2_msgs::msg::OwnerUpdate>(
+                "/orb_slam2/owner_update", qos,
+                std::bind(&ORBSLAM3Node::ownerUpdateCallback, this, _1));
+            back_obs_sub_ = this->create_subscription<orbslam2_msgs::msg::BackObservations>(
+                "/orb_slam2/back_observations", qos,
+                std::bind(&ORBSLAM3Node::backObservationsCallback, this, _1));
 
             // Background worker thread: processes ImportHighQualityMapPoints
             // batches so the ROS callback thread is never blocked.
@@ -731,6 +745,58 @@ private:
                 req.stamp           = now;
                 agent_req_pub_->publish(req);
             }
+
+            // Owner side: what moved among the keyframes and landmarks we
+            // have handed out.
+            ORB_SLAM3::MultiAgentManager::OwnerUpdate ou;
+            if (slam_->mpMA->GetOwnerUpdate(ou)) {
+                orbslam2_msgs::msg::OwnerUpdate m;
+                m.source_agent = agent_name_;
+                m.stamp = now;
+                m.keyframe_id.reserve(ou.kfIds.size());
+                m.keyframe_pose.reserve(ou.kfIds.size() * 7);
+                for (size_t i = 0; i < ou.kfIds.size() && i < ou.kfTcw.size(); ++i) {
+                    const cv::Mat& T = ou.kfTcw[i];
+                    Eigen::Matrix3f R;
+                    for (int r = 0; r < 3; ++r)
+                        for (int c = 0; c < 3; ++c) R(r, c) = T.at<float>(r, c);
+                    Eigen::Quaternionf q(R);
+                    q.normalize();
+                    m.keyframe_id.push_back(ou.kfIds[i]);
+                    m.keyframe_pose.insert(m.keyframe_pose.end(),
+                        {T.at<float>(0, 3), T.at<float>(1, 3), T.at<float>(2, 3),
+                         q.x(), q.y(), q.z(), q.w()});
+                }
+                for (const auto& u : ou.landmarks) {
+                    m.landmark_id.push_back(static_cast<uint64_t>(u.mpId));
+                    m.landmark_anchor_kf.push_back(u.kfId);
+                    m.landmark_xc.insert(m.landmark_xc.end(), {u.Xc.x, u.Xc.y, u.Xc.z});
+                }
+                for (long long id : ou.removed)
+                    m.removed_landmark_id.push_back(static_cast<uint64_t>(id));
+                owner_update_pub_->publish(m);
+                RCLCPP_INFO(this->get_logger(),
+                    "[own] broadcast %zu keyframe pose(s), %zu landmark update(s), "
+                    "%zu removal(s)", m.keyframe_id.size(), m.landmark_id.size(),
+                    m.removed_landmark_id.size());
+            }
+
+            // Copy side: our sightings of each owner's landmarks.
+            for (const auto& b : slam_->mpMA->GetPendingBackObservations()) {
+                orbslam2_msgs::msg::BackObservations m;
+                m.observer_agent = agent_name_;
+                m.owner_agent    = b.owner;
+                m.stamp          = now;
+                m.owner_landmark_id.reserve(b.obs.size());
+                m.observer_keyframe_id.reserve(b.obs.size());
+                m.keypoint_index.reserve(b.obs.size());
+                for (const auto& o : b.obs) {
+                    m.owner_landmark_id.push_back(static_cast<uint64_t>(o.ownerMpId));
+                    m.observer_keyframe_id.push_back(o.observerKfId);
+                    m.keypoint_index.push_back(static_cast<uint32_t>(o.kpIndex));
+                }
+                back_obs_pub_->publish(m);
+            }
         }
     }
 
@@ -854,6 +920,29 @@ private:
                 std::memcpy(&out.descriptors[i * 32],
                             kf.descriptors.ptr<uint8_t>((int)i), 32);
 
+            // Our own landmarks for this keyframe: the sender's map points,
+            // each with its observation count and its position in this
+            // keyframe's camera frame. The receiver uses these instead of the
+            // raw depth readings, so it inherits geometry we already
+            // bundle-adjusted and probation we already ran.
+            const size_t M = kf.mpKpIndex.size();
+            out.num_landmarks = static_cast<uint32_t>(M);
+            out.mp_kp_index.resize(M);
+            out.mp_id.resize(M);
+            out.mp_num_obs.resize(M);
+            out.mp_cam_x.resize(M);
+            out.mp_cam_y.resize(M);
+            out.mp_cam_z.resize(M);
+            for (size_t i = 0; i < M; ++i) {
+                out.mp_kp_index[i] = static_cast<uint32_t>(kf.mpKpIndex[i]);
+                out.mp_id[i]       = static_cast<uint64_t>(kf.mpId[i]);
+                out.mp_num_obs[i]  = static_cast<uint16_t>(
+                                        std::min(kf.mpNumObs[i], 65535));
+                out.mp_cam_x[i]    = kf.mpCam[i].x;
+                out.mp_cam_y[i]    = kf.mpCam[i].y;
+                out.mp_cam_z[i]    = kf.mpCam[i].z;
+            }
+
             // Our own pose for this keyframe, so the receiver can later check
             // whether several inter-agent matches agree with each other.
             out.has_pose = kf.has_pose;
@@ -874,9 +963,79 @@ private:
             out.stamp = this->now();
             kf_data_pub_->publish(out);
             RCLCPP_INFO(this->get_logger(),
-                "[kf-share] sent KF %lu (%zu keypoints) to %s",
-                (unsigned long)msg->keyframe_id, N, msg->requester_agent.c_str());
+                "[kf-share] sent KF %lu (%zu keypoints, %zu landmarks) to %s",
+                (unsigned long)msg->keyframe_id, N, M,
+                msg->requester_agent.c_str());
         }
+    }
+
+    // An owner told us what moved among the keyframes and landmarks we copied.
+    void ownerUpdateCallback(const orbslam2_msgs::msg::OwnerUpdate::SharedPtr msg)
+    {
+        if (msg->source_agent == agent_name_) return;    // our own echo
+        if (!slam_ || !slam_->mpMA) return;
+        const size_t K = msg->keyframe_id.size();
+        const size_t L = msg->landmark_id.size();
+        if (msg->keyframe_pose.size() != K * 7 ||
+            msg->landmark_anchor_kf.size() != L || msg->landmark_xc.size() != L * 3) {
+            RCLCPP_WARN(this->get_logger(),
+                "[own] malformed owner update from %s; dropping",
+                msg->source_agent.c_str());
+            return;
+        }
+        ORB_SLAM3::MultiAgentManager::OwnerUpdate u;
+        u.kfIds.reserve(K);
+        u.kfTcw.reserve(K);
+        for (size_t i = 0; i < K; ++i) {
+            const float* v = &msg->keyframe_pose[i * 7];
+            Eigen::Quaternionf q(v[6], v[3], v[4], v[5]);
+            q.normalize();
+            const Eigen::Matrix3f R = q.toRotationMatrix();
+            cv::Mat T = cv::Mat::eye(4, 4, CV_32F);
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) T.at<float>(r, c) = R(r, c);
+                T.at<float>(r, 3) = v[r];
+            }
+            u.kfIds.push_back(msg->keyframe_id[i]);
+            u.kfTcw.push_back(T);
+        }
+        u.landmarks.reserve(L);
+        for (size_t i = 0; i < L; ++i) {
+            ORB_SLAM3::MultiAgentManager::LandmarkUpdate lu;
+            lu.mpId = static_cast<long long>(msg->landmark_id[i]);
+            lu.kfId = msg->landmark_anchor_kf[i];
+            lu.Xc   = cv::Point3f(msg->landmark_xc[i * 3], msg->landmark_xc[i * 3 + 1],
+                                  msg->landmark_xc[i * 3 + 2]);
+            u.landmarks.push_back(lu);
+        }
+        for (uint64_t id : msg->removed_landmark_id)
+            u.removed.push_back(static_cast<long long>(id));
+        slam_->mpMA->ImportOwnerUpdate(msg->source_agent, u);
+    }
+
+    // A peer saw some of OUR landmarks; its sightings go into our BA.
+    void backObservationsCallback(const orbslam2_msgs::msg::BackObservations::SharedPtr msg)
+    {
+        if (msg->owner_agent != agent_name_) return;     // not addressed to us
+        if (msg->observer_agent == agent_name_) return;
+        if (!slam_ || !slam_->mpMA) return;
+        const size_t n = msg->owner_landmark_id.size();
+        if (msg->observer_keyframe_id.size() != n || msg->keypoint_index.size() != n) {
+            RCLCPP_WARN(this->get_logger(),
+                "[own] malformed back-observations from %s; dropping",
+                msg->observer_agent.c_str());
+            return;
+        }
+        std::vector<ORB_SLAM3::MultiAgentManager::BackObservation> obs(n);
+        for (size_t i = 0; i < n; ++i) {
+            obs[i].ownerMpId    = static_cast<long long>(msg->owner_landmark_id[i]);
+            obs[i].observerKfId = msg->observer_keyframe_id[i];
+            obs[i].kpIndex      = static_cast<int>(msg->keypoint_index[i]);
+        }
+        slam_->mpMA->ImportBackObservations(msg->observer_agent, obs);
+        RCLCPP_INFO(this->get_logger(),
+            "[own] received %zu sighting(s) of our landmarks from %s",
+            n, msg->observer_agent.c_str());
     }
 
     // Calibration is broadcast, not addressed: every agent caches every peer's
@@ -930,6 +1089,32 @@ private:
         kf.descriptors  = cv::Mat((int)N, 32, CV_8U);
         std::memcpy(kf.descriptors.data, msg->descriptors.data(), N * 32);
 
+        // The sender's own landmarks. Malformed or mismatched arrays are simply
+        // dropped: a keyframe with no landmark list still fuses, it just
+        // contributes no new points, which is safer than trusting ragged data.
+        const size_t M = msg->num_landmarks;
+        if (M > 0 && msg->mp_kp_index.size() == M && msg->mp_id.size() == M &&
+            msg->mp_num_obs.size() == M && msg->mp_cam_x.size() == M &&
+            msg->mp_cam_y.size() == M && msg->mp_cam_z.size() == M) {
+            kf.mpKpIndex.reserve(M);
+            kf.mpId.reserve(M);
+            kf.mpNumObs.reserve(M);
+            kf.mpCam.reserve(M);
+            for (size_t i = 0; i < M; ++i) {
+                if (msg->mp_kp_index[i] >= N) continue;   // out of range; skip
+                kf.mpKpIndex.push_back(static_cast<int>(msg->mp_kp_index[i]));
+                kf.mpId.push_back(static_cast<long long>(msg->mp_id[i]));
+                kf.mpNumObs.push_back(static_cast<int>(msg->mp_num_obs[i]));
+                kf.mpCam.emplace_back(msg->mp_cam_x[i], msg->mp_cam_y[i],
+                                      msg->mp_cam_z[i]);
+            }
+        } else if (M > 0) {
+            RCLCPP_WARN(this->get_logger(),
+                "[kf-share] KF %lu from %s has a ragged landmark list (M=%zu); "
+                "ignoring its landmarks",
+                (unsigned long)msg->keyframe_id, msg->source_agent.c_str(), M);
+        }
+
         kf.has_pose = msg->has_pose;
         if (msg->has_pose) {
             Eigen::Quaternionf q(msg->pose.rotation.w, msg->pose.rotation.x,
@@ -947,8 +1132,9 @@ private:
 
         slam_->mpMA->ImportForeignKeyFrame(kf);
         RCLCPP_INFO(this->get_logger(),
-            "[kf-share] received KF %lu (%zu keypoints) from %s",
-            (unsigned long)msg->keyframe_id, N, msg->source_agent.c_str());
+            "[kf-share] received KF %lu (%zu keypoints, %zu landmarks) from %s",
+            (unsigned long)msg->keyframe_id, N, kf.mpKpIndex.size(),
+            msg->source_agent.c_str());
     }
 
     void importWorkerLoop() {
@@ -1367,6 +1553,10 @@ private:
     rclcpp::Subscription<orbslam2_msgs::msg::CameraCalib>::SharedPtr calib_sub_;
     rclcpp::Publisher<orbslam2_msgs::msg::KeyFrameData>::SharedPtr kf_data_pub_;
     rclcpp::Subscription<orbslam2_msgs::msg::KeyFrameData>::SharedPtr kf_data_sub_;
+    rclcpp::Publisher<orbslam2_msgs::msg::OwnerUpdate>::SharedPtr owner_update_pub_;
+    rclcpp::Subscription<orbslam2_msgs::msg::OwnerUpdate>::SharedPtr owner_update_sub_;
+    rclcpp::Publisher<orbslam2_msgs::msg::BackObservations>::SharedPtr back_obs_pub_;
+    rclcpp::Subscription<orbslam2_msgs::msg::BackObservations>::SharedPtr back_obs_sub_;
     std::string ma_method_;
 
     // RGBD-Inertial support (only active when use_imu_)
