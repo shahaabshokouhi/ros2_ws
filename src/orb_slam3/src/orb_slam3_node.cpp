@@ -722,6 +722,22 @@ private:
                 msg.stamp = now;
 
                 msg.bow_min_score = entry.min_score;
+                // Where it sits in our map, for a peer copying our map.
+                msg.in_main_map = entry.in_main_map;
+                msg.has_pose    = entry.has_pose && !entry.Tcw.empty();
+                if (msg.has_pose) {
+                    const cv::Mat& T = entry.Tcw;
+                    Eigen::Matrix3f R;
+                    for (int r = 0; r < 3; ++r)
+                        for (int c = 0; c < 3; ++c) R(r, c) = T.at<float>(r, c);
+                    Eigen::Quaternionf q(R);
+                    q.normalize();
+                    msg.pose = {T.at<float>(0, 3), T.at<float>(1, 3), T.at<float>(2, 3),
+                                q.x(), q.y(), q.z(), q.w()};
+                }
+                msg.has_parent = entry.has_parent;
+                msg.parent_id  = entry.parent_id;
+                msg.neighbour_ids.assign(entry.neighbours.begin(), entry.neighbours.end());
                 msg.word_ids.reserve(entry.bow.size());
                 msg.word_values.reserve(entry.bow.size());
                 for (const auto& [wordId, wordVal] : entry.bow) {
@@ -775,7 +791,7 @@ private:
                 for (long long id : ou.removed)
                     m.removed_landmark_id.push_back(static_cast<uint64_t>(id));
                 owner_update_pub_->publish(m);
-                RCLCPP_INFO(this->get_logger(),
+                RCLCPP_DEBUG(this->get_logger(),
                     "[own] broadcast %zu keyframe pose(s), %zu landmark update(s), "
                     "%zu removal(s)", m.keyframe_id.size(), m.landmark_id.size(),
                     m.removed_landmark_id.size());
@@ -865,6 +881,23 @@ private:
         if (slam_ && slam_->mpMA) {
             slam_->mpMA->ImportKeyFrameBoW(msg->agent_name, msg->keyframe_id, bow,
                                            msg->bow_min_score);
+            cv::Mat T;
+            if (msg->has_pose) {
+                const auto& v = msg->pose;
+                Eigen::Quaternionf q(v[6], v[3], v[4], v[5]);
+                q.normalize();
+                const Eigen::Matrix3f R = q.toRotationMatrix();
+                T = cv::Mat::eye(4, 4, CV_32F);
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) T.at<float>(r, c) = R(r, c);
+                    T.at<float>(r, 3) = v[r];
+                }
+            }
+            slam_->mpMA->ImportKeyFrameGraph(
+                msg->agent_name, msg->keyframe_id, msg->in_main_map, msg->has_pose, T,
+                msg->has_parent, msg->parent_id,
+                std::vector<long unsigned int>(msg->neighbour_ids.begin(),
+                                               msg->neighbour_ids.end()));
         }
     }
 
@@ -899,8 +932,18 @@ private:
         if (msg->request_type == orbslam2_msgs::msg::AgentRequest::KEYFRAME) {
             ORB_SLAM3::MultiAgentManager::ForeignKeyFrame kf;
             if (!slam_->mpMA->GetOwnKeyFrameFeatures(msg->keyframe_id, kf)) {
-                RCLCPP_WARN(this->get_logger(),
-                    "[kf-share] KF %lu requested by %s not available",
+                // Our map cleanup culled it after we advertised it. Say so,
+                // or the requester keeps asking for it forever.
+                orbslam2_msgs::msg::KeyFrameData gone;
+                gone.source_agent    = agent_name_;
+                gone.requester_agent = msg->requester_agent;
+                gone.keyframe_id     = msg->keyframe_id;
+                gone.gone            = true;
+                gone.num_keypoints   = 0;
+                gone.stamp           = this->now();
+                kf_data_pub_->publish(gone);
+                RCLCPP_DEBUG(this->get_logger(),
+                    "[kf-share] KF %lu requested by %s no longer exists; told it so",
                     (unsigned long)msg->keyframe_id, msg->requester_agent.c_str());
                 return;
             }
@@ -962,7 +1005,7 @@ private:
             }
             out.stamp = this->now();
             kf_data_pub_->publish(out);
-            RCLCPP_INFO(this->get_logger(),
+            RCLCPP_DEBUG(this->get_logger(),
                 "[kf-share] sent KF %lu (%zu keypoints, %zu landmarks) to %s",
                 (unsigned long)msg->keyframe_id, N, M,
                 msg->requester_agent.c_str());
@@ -1033,7 +1076,7 @@ private:
             obs[i].kpIndex      = static_cast<int>(msg->keypoint_index[i]);
         }
         slam_->mpMA->ImportBackObservations(msg->observer_agent, obs);
-        RCLCPP_INFO(this->get_logger(),
+        RCLCPP_DEBUG(this->get_logger(),
             "[own] received %zu sighting(s) of our landmarks from %s",
             n, msg->observer_agent.c_str());
     }
@@ -1068,6 +1111,14 @@ private:
         if (msg->requester_agent != agent_name_) return;  // not our reply
         if (msg->source_agent == agent_name_) return;     // ignore our own echo
         if (!slam_ || !slam_->mpMA) return;
+
+        if (msg->gone) {                                   // culled by its owner
+            slam_->mpMA->ForgetForeignKeyFrame(msg->source_agent, msg->keyframe_id);
+            RCLCPP_DEBUG(this->get_logger(),
+                "[kf-share] %s no longer has KF %lu; forgetting it",
+                msg->source_agent.c_str(), (unsigned long)msg->keyframe_id);
+            return;
+        }
 
         const size_t N = msg->num_keypoints;
         if (N == 0 || msg->kp_u.size() != N || msg->kp_v.size() != N ||
@@ -1131,7 +1182,7 @@ private:
         }
 
         slam_->mpMA->ImportForeignKeyFrame(kf);
-        RCLCPP_INFO(this->get_logger(),
+        RCLCPP_DEBUG(this->get_logger(),
             "[kf-share] received KF %lu (%zu keypoints, %zu landmarks) from %s",
             (unsigned long)msg->keyframe_id, N, kf.mpKpIndex.size(),
             msg->source_agent.c_str());

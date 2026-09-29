@@ -10,6 +10,12 @@ string source_agent
 string requester_agent
 uint64 keyframe_id
 
+# True when the sender no longer has this keyframe -- its own map cleanup
+# (KeyFrameCulling) removed it after it was advertised. Every array is then
+# empty. Without this the requester would never get an answer and would keep
+# asking forever.
+bool gone
+
 uint32 num_keypoints        # N; all arrays below are sized from this
 float32[] kp_u              # N, undistorted pixel u
 float32[] kp_v              # N, undistorted pixel v
