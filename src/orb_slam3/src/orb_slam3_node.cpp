@@ -43,6 +43,8 @@
 #include <orbslam2_msgs/msg/camera_calib.hpp>
 #include <orbslam2_msgs/msg/key_frame_data.hpp>
 #include <orbslam2_msgs/msg/owner_update.hpp>
+#include <rclcpp/serialization.hpp>
+#include <fstream>
 #include <orbslam2_msgs/msg/back_observations.hpp>
 
 #include <MapPoint.h>
@@ -745,6 +747,7 @@ private:
                     msg.word_values.push_back(wordVal);
                 }
                 kf_bow_pub_->publish(msg);
+                countSent("kf_bow", msg);
             }
 
             // Publish whatever the MA thread queued this cycle (calibration
@@ -760,6 +763,7 @@ private:
                 req.keyframe_id     = r.kf_id;
                 req.stamp           = now;
                 agent_req_pub_->publish(req);
+                countSent("agent_request", req);
             }
 
             // Owner side: what moved among the keyframes and landmarks we
@@ -791,6 +795,7 @@ private:
                 for (long long id : ou.removed)
                     m.removed_landmark_id.push_back(static_cast<uint64_t>(id));
                 owner_update_pub_->publish(m);
+                countSent("owner_update", m);
                 RCLCPP_DEBUG(this->get_logger(),
                     "[own] broadcast %zu keyframe pose(s), %zu landmark update(s), "
                     "%zu removal(s)", m.keyframe_id.size(), m.landmark_id.size(),
@@ -812,6 +817,7 @@ private:
                     m.keypoint_index.push_back(static_cast<uint32_t>(o.kpIndex));
                 }
                 back_obs_pub_->publish(m);
+                countSent("back_observations", m);
             }
         }
     }
@@ -924,6 +930,7 @@ private:
             out.scale_factor   = c.scale_factor;
             out.stamp          = this->now();
             calib_pub_->publish(out);
+                countSent("camera_calib", out);
             RCLCPP_INFO(this->get_logger(),
                 "[kf-share] sent calibration to %s", msg->requester_agent.c_str());
             return;
@@ -942,6 +949,7 @@ private:
                 gone.num_keypoints   = 0;
                 gone.stamp           = this->now();
                 kf_data_pub_->publish(gone);
+                countSent("kf_data_gone", gone);
                 RCLCPP_DEBUG(this->get_logger(),
                     "[kf-share] KF %lu requested by %s no longer exists; told it so",
                     (unsigned long)msg->keyframe_id, msg->requester_agent.c_str());
@@ -1005,6 +1013,7 @@ private:
             }
             out.stamp = this->now();
             kf_data_pub_->publish(out);
+                countSent("kf_data", out);
             RCLCPP_DEBUG(this->get_logger(),
                 "[kf-share] sent KF %lu (%zu keypoints, %zu landmarks) to %s",
                 (unsigned long)msg->keyframe_id, N, M,
@@ -1568,6 +1577,13 @@ public:
                 slam_->mpMA->ExportMapPointDescriptorsCSV(csv_path);
             }
 
+            // Evaluation run: final keyframes (with origin and timestamps) and
+            // what this agent sent over the network.
+            if (slam_->mpMA && !slam_->mpMA->EvalDir().empty()) {
+                slam_->mpMA->ExportEvalKeyFrames();
+                writeCosts(slam_->mpMA->EvalDir() + "/costs.csv");
+            }
+
             // Finalize the offline dataset using the now-optimized keyframe
             // poses (must run while slam_ is still alive for the Atlas export).
             if (save_keyframes_) {
@@ -1577,6 +1593,41 @@ public:
     }
 
 private:
+
+    // ── Network cost accounting (evaluation runs only) ───────────────────
+    // Exact serialized size of every inter-agent message this agent sends,
+    // per message type. Summed over agents this is the total network load.
+    std::mutex cost_mtx_;
+    std::map<std::string, std::pair<uint64_t, uint64_t>> costs_;   // type -> (count, bytes)
+
+    template <class M>
+    void countSent(const char* type, const M& msg)
+    {
+        if (!slam_ || !slam_->mpMA || slam_->mpMA->EvalDir().empty()) return;
+        rclcpp::Serialization<M> ser;
+        rclcpp::SerializedMessage sm;
+        ser.serialize_message(&msg, &sm);
+        std::lock_guard<std::mutex> lk(cost_mtx_);
+        auto& c = costs_[type];
+        c.first  += 1;
+        c.second += sm.size();
+    }
+
+    void writeCosts(const std::string& path)
+    {
+        std::lock_guard<std::mutex> lk(cost_mtx_);
+        std::ofstream out(path, std::ios::trunc);
+        if (!out) return;
+        out << "type,count,bytes\n";
+        uint64_t total = 0;
+        for (const auto& kv : costs_) {
+            out << kv.first << ',' << kv.second.first << ',' << kv.second.second << '\n';
+            total += kv.second.second;
+        }
+        std::cout << "[ORBSLAM3Node] sent " << std::fixed << std::setprecision(2)
+                  << total / 1e6 << " MB over " << costs_.size()
+                  << " message types; costs in " << path << "\n";
+    }
 
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     // image_plane_pub_ commented out — see publisher creation and publish block
