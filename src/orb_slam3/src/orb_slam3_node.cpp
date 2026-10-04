@@ -534,6 +534,7 @@ private:
                 }
                 if (!mappoints_msg.points.empty()) {
                     mappoint_pub_->publish(mappoints_msg);
+                    countSent("mappoints", mappoints_msg);
                     publishedCount_ += mappoints_msg.points.size();
                 }
             }
@@ -542,7 +543,7 @@ private:
             if (publish_single_mappoint && !vpHighQualityMapPoints.empty()) {
                 for (auto* pMP : vpHighQualityMapPoints) {
                     if (!pMP) continue;
-                    single_mappoint_pub_->publish(toMsg(pMP));
+                    { auto smsg = toMsg(pMP); single_mappoint_pub_->publish(smsg); countSent("single_mappoint", smsg); }
                     publishedCount_++;
                     pMP->SentToOther(true);
                 }
@@ -588,6 +589,23 @@ private:
                 static_cast<double>(importedCount_.load()),
             };
             slam_metrics_pub_->publish(m);
+
+            // Evaluation only: the same numbers, one row per frame, plus the
+            // LocalMapping backlog, so busy periods can be lined up with what
+            // the multi-agent manager was doing (its cycle.csv).
+            if (slam_ && slam_->mpMA && !slam_->mpMA->EvalDir().empty()) {
+                if (!frames_out_.is_open()) {
+                    frames_out_.open(slam_->mpMA->EvalDir() + "/frames.csv", std::ios::trunc);
+                    frames_out_ << "wall,stamp,track_ms,tracking_state,map_points,lm_queue\n";
+                }
+                const double wall = std::chrono::duration<double>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                frames_out_ << std::fixed << std::setprecision(3) << wall << ','
+                            << std::setprecision(6) << timestamp << ','
+                            << std::setprecision(2) << last_track_ms_ << ','
+                            << tracking_state << ',' << n_mp << ','
+                            << slam_->mpMA->LocalMappingQueue() << '\n';
+            }
         }
     }
 
@@ -1546,6 +1564,7 @@ private:
     std::atomic<uint64_t> receivedCount_{0};
     std::atomic<uint64_t> importedCount_{0};
     double last_track_ms_ = 0.0;
+    std::ofstream frames_out_;   // evaluation only: frames.csv
 
     std::unique_ptr<ORB_SLAM3::System> slam_;
     nav_msgs::msg::Path path_msg_;
