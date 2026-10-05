@@ -605,6 +605,9 @@ private:
                             << std::setprecision(2) << last_track_ms_ << ','
                             << tracking_state << ',' << n_mp << ','
                             << slam_->mpMA->LocalMappingQueue() << '\n';
+                // Flush about once a second, so a crash (the runs this log is
+                // for) loses at most the last second.
+                if (++frames_since_flush_ >= 30) { frames_out_.flush(); frames_since_flush_ = 0; }
             }
         }
     }
@@ -1565,6 +1568,7 @@ private:
     std::atomic<uint64_t> importedCount_{0};
     double last_track_ms_ = 0.0;
     std::ofstream frames_out_;   // evaluation only: frames.csv
+    int frames_since_flush_ = 0;
 
     std::unique_ptr<ORB_SLAM3::System> slam_;
     nav_msgs::msg::Path path_msg_;
