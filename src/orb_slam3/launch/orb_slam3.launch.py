@@ -69,6 +69,30 @@ def generate_launch_description():
             default_value='2.0',
             description='Rate at which jetson_monitor publishes hardware metrics (Hz)'
         ),
+        DeclareLaunchArgument(
+            'occupancy_grid',
+            default_value='false',
+            description='Publish a Nav2 occupancy grid (/<agent>/map, frame map_nav) '
+                        'built from depth, plus base_link and /<agent>/orb_slam3/odom'
+        ),
+        DeclareLaunchArgument(
+            'teleop',
+            default_value='false',
+            description='Single-robot keyboard driving from another computer: publish a '
+                        'small grayscale view (/<agent>/orb_slam3/gray) and run the base '
+                        'driver that executes /<agent>/cmd_vel'
+        ),
+        DeclareLaunchArgument(
+            'teleop_driver',
+            default_value='true',
+            description='With teleop: also start the jetracer base driver (set false if '
+                        'run_joystick.sh / run_controller.sh already runs it)'
+        ),
+        DeclareLaunchArgument(
+            'port_name',
+            default_value='/dev/ttyACM0',
+            description='Serial port of the jetracer motor board (base driver)'
+        ),
         OpaqueFunction(function=launch_nodes),
     ])
 
@@ -87,6 +111,13 @@ def launch_nodes(context):
     monitor_str     = LaunchConfiguration('monitor').perform(context)
     launch_monitor  = monitor_str.strip().lower() in ('true', '1', 'yes', 'on')
     monitor_rate    = float(LaunchConfiguration('monitor_rate_hz').perform(context))
+    occupancy_grid  = LaunchConfiguration('occupancy_grid').perform(context).strip().lower() \
+        in ('true', '1', 'yes', 'on')
+    teleop          = LaunchConfiguration('teleop').perform(context).strip().lower() \
+        in ('true', '1', 'yes', 'on')
+    teleop_driver   = LaunchConfiguration('teleop_driver').perform(context).strip().lower() \
+        in ('true', '1', 'yes', 'on')
+    port_name       = LaunchConfiguration('port_name').perform(context)
 
     def tgt(suffix: str) -> str:
         # build "/<agent>/<suffix>"
@@ -187,6 +218,8 @@ def launch_nodes(context):
             {'tracking_rtprio': tracking_rtprio},
             {'ma_method': ma_method},
             {'use_imu': use_imu},
+            {'occupancy_grid': occupancy_grid},
+            {'publish_gray': teleop},
         ],
     )
 
@@ -204,5 +237,21 @@ def launch_nodes(context):
             }],
         )
         nodes.append(monitor_node)
+
+    if teleop and teleop_driver:
+        # Base driver: executes /<agent>/cmd_vel (sent by `ros2 run jetracer
+        # teleop` on another computer) and stops the motors by itself after
+        # 1 s without a command. Same settings as jetracer.launch.py.
+        nodes.append(Node(
+            package='jetracer',
+            executable='jetracer',
+            name='jetracer',
+            output='screen',
+            parameters=[
+                {'port_name': port_name},
+                {'publish_odom_transform': False},
+                {'agent_name': agent},
+            ],
+        ))
 
     return nodes

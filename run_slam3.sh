@@ -11,6 +11,10 @@
 #   ./run_slam3.sh --save          # also save keyframes for offline neural SDF
 #   ./run_slam3.sh --method new    # use BoW-sharing multi-agent method
 #   ./run_slam3.sh --save --method new   # combine flags
+#   ./run_slam3.sh --grid          # also publish a Nav2 occupancy grid (/<agent>/map)
+#   ./run_slam3.sh --teleop        # single-robot test: drive it from another computer's
+#                                  # keyboard (there: ./run_teleop.sh <agent>); publishes a
+#                                  # small gray camera view and starts the base driver
 #
 # When saving is on, each keyframe's RGB + depth and the final optimized
 # keyframe poses are written to a slam_00N folder (default under ~/result) in
@@ -26,6 +30,8 @@ MONITOR_RATE=2.0
 #   true            -> force RGBD-Inertial (--imu)
 #   auto            -> use IMU iff the settings file has IMU.T_b_c1 calibration (--imu-auto)
 USE_IMU="false"
+OCCUPANCY_GRID=false
+TELEOP=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --save|--save-keyframes|save|yes|true)
@@ -56,10 +62,18 @@ while [[ $# -gt 0 ]]; do
             MONITOR_RATE="$2"
             shift 2
             ;;
+        --grid)
+            OCCUPANCY_GRID=true
+            shift
+            ;;
+        --teleop)
+            TELEOP=true
+            shift
+            ;;
         *)
             echo "Unknown argument: $1"
             echo "Usage: ./run_slam3.sh [--save] [--method hq-mpshare|new] [--imu|--imu-auto|--no-imu]"
-            echo "                      [--monitor] [--monitor-rate HZ]"
+            echo "                      [--monitor] [--monitor-rate HZ] [--grid] [--teleop]"
             exit 1
             ;;
     esac
@@ -82,6 +96,8 @@ fi
 echo "MA method: $MA_METHOD"
 echo "IMU mode: $USE_IMU"
 echo "Jetson monitor: $MONITOR (${MONITOR_RATE} Hz)"
+echo "Occupancy grid: $OCCUPANCY_GRID"
+echo "Teleop: $TELEOP"
 
 colcon build --packages-select orb_slam3 --cmake-clean-cache
 source install/setup.bash
@@ -97,7 +113,17 @@ LAUNCH_ARGS=(
     use_imu:="$USE_IMU"
     monitor:="$MONITOR"
     monitor_rate_hz:="$MONITOR_RATE"
+    occupancy_grid:="$OCCUPANCY_GRID"
+    teleop:="$TELEOP"
 )
+# The base driver owns the motor board's serial port: if run_joystick.sh or
+# run_controller.sh already started it, do not start a second one.
+if [ "$TELEOP" = "true" ]; then
+    if pgrep -f "lib/jetracer/jetracer( |$)" >/dev/null; then
+        echo "Teleop: base driver already running; not starting another"
+        LAUNCH_ARGS+=(teleop_driver:=false)
+    fi
+fi
 if [ -n "$RESULT_DIR" ]; then
     LAUNCH_ARGS+=(result_dir:="$RESULT_DIR")
 fi

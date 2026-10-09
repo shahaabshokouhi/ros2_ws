@@ -45,4 +45,11 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# Keyboard teleop from a remote computer: ros2 run jetracer teleop
+install(PROGRAMS
+  scripts/teleop_keyboard.py
+  RENAME teleop
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()

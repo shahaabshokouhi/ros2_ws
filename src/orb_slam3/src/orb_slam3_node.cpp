@@ -51,6 +51,7 @@
 #include <System.h>
 #include <KeyFrame.h>
 #include <Tracking.h>
+#include "occupancy_mapper.hpp"
 
 #include <atomic>
 #include <unordered_map>
@@ -154,6 +155,30 @@ public:
             expected_height_ = (int)fsettings["Camera.height"];
 
             tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+
+            // Small grayscale view of what the robot sees, for driving it from
+            // another computer (teleop). Off by default: a 320x240 mono image
+            // at 5 Hz is ~0.4 MB/s on the network, which multi-agent runs
+            // should not pay.
+            if (this->declare_parameter<bool>("publish_gray", false)) {
+                gray_rate_hz_ = this->declare_parameter<double>("gray_rate_hz", 5.0);
+                gray_width_   = this->declare_parameter<int>("gray_width", 320);
+                gray_pub_ = this->create_publisher<sensor_msgs::msg::Image>(
+                    agent_name_ + "/orb_slam3/gray", rclcpp::QoS(1).reliable());
+            }
+
+            // Occupancy grid for Nav2 from the depth images (occupancy_mapper.hpp).
+            // Off by default: it adds the map_nav / base_link frames and a
+            // per-frame depth pass that multi-agent runs do not need.
+            if (this->declare_parameter<bool>("occupancy_grid", false)) {
+                const auto gp = orbslam3_nav::GridParams::declare(this);
+                grid_ = std::make_unique<orbslam3_nav::OccupancyMapper>(
+                    this, slam_.get(), fx_, fy_, cx_, cy_, gp, agent_name_);
+                RCLCPP_INFO(this->get_logger(),
+                            "[grid] occupancy grid on: /%s/map in frame %s, obstacles %.2f-%.2f m "
+                            "above the floor within %.1f m", agent_name_.c_str(),
+                            gp.globalFrame.c_str(), gp.minHeight, gp.maxHeight, gp.maxRange);
+            }
 
             auto qos = rclcpp::QoS(rclcpp::KeepLast(5000)).reliable().durability_volatile();
 
@@ -396,6 +421,11 @@ private:
                 return;
             }
         }
+
+        if (grid_ && !depth_normalized.empty())
+            grid_->addFrame(depth_normalized, Tcw, trackingOk, color_msg->header.stamp);
+        if (gray_pub_ && !bgr_image.empty())
+            publishGray(bgr_image, trackingOk, color_msg->header);
 
         if (!trackingOk && !trackingFailed) {
             RCLCPP_WARN(this->get_logger(), "Tracking failed");
@@ -1571,6 +1601,11 @@ private:
     int frames_since_flush_ = 0;
 
     std::unique_ptr<ORB_SLAM3::System> slam_;
+    std::unique_ptr<orbslam3_nav::OccupancyMapper> grid_;   // null unless occupancy_grid:=true
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr gray_pub_;   // null unless publish_gray:=true
+    double gray_rate_hz_ = 5.0;
+    int gray_width_ = 320;
+    rclcpp::Time gray_last_{0, 0, RCL_ROS_TIME};
     nav_msgs::msg::Path path_msg_;
 
 public:
@@ -1579,7 +1614,31 @@ public:
     int trackingCpu() const { return tracking_cpu_; }
     int trackingRtPrio() const { return tracking_rtprio_; }
 
+    // Downscaled grayscale frame with the tracking state written on it.
+    void publishGray(const cv::Mat& bgr, bool trackingOk, const std_msgs::msg::Header& header) {
+        const rclcpp::Time now = this->now();
+        if (gray_rate_hz_ > 0.0 && gray_last_.nanoseconds() > 0 &&
+            (now - gray_last_).seconds() < 1.0 / gray_rate_hz_) return;
+        gray_last_ = now;
+        cv::Mat gray, small;
+        cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
+        const int w = std::max(80, std::min(gray_width_, gray.cols));
+        cv::resize(gray, small, cv::Size(w, gray.rows * w / gray.cols), 0, 0, cv::INTER_AREA);
+        cv::putText(small, trackingOk ? "TRACKING" : "LOST", cv::Point(6, 18),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255), 2);
+        sensor_msgs::msg::Image m;
+        m.header = header;
+        m.height = small.rows;
+        m.width = small.cols;
+        m.encoding = "mono8";
+        m.is_bigendian = 0;
+        m.step = small.cols;
+        m.data.assign(small.data, small.data + (size_t)small.rows * small.cols);
+        gray_pub_->publish(m);
+    }
+
     void onShutdown() {
+        grid_.reset();   // stops the grid thread before SLAM shuts down
         // Stop the background import worker before touching SLAM internals
         {
             std::lock_guard<std::mutex> lk(import_queue_mtx_);
