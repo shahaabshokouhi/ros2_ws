@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>JetRacer Simulation Quick Start</title>
+<style>
+  @page { size: A4; margin: 16mm 16mm 16mm 16mm; }
+  :root { --ink: #1d2433; --muted: #5b6577; --accent: #1f6feb; --line: #d9dee7; --code: #f3f5f9; --warn: #fff6e0; --warnline: #e7b416; }
+  body { font-family: "DejaVu Sans", "Helvetica", sans-serif; color: var(--ink); font-size: 10.2pt; line-height: 1.45; margin: 0; background: #fff; }
+  h1 { font-size: 20pt; margin: 0 0 2mm; }
+  .sub { color: var(--muted); margin-bottom: 6mm; }
+  h2 { font-size: 13pt; color: var(--accent); border-bottom: 1.5px solid var(--line); padding-bottom: 1mm; margin: 7mm 0 3mm; break-after: avoid; }
+  h3 { font-size: 11pt; margin: 4mm 0 1.5mm; break-after: avoid; }
+  code, pre { font-family: "DejaVu Sans Mono", monospace; font-size: 9pt; }
+  code { background: var(--code); padding: 0.3mm 1.2mm; border-radius: 1mm; }
+  pre { background: var(--code); border: 1px solid var(--line); border-radius: 1.5mm; padding: 2.5mm 3mm; margin: 2mm 0 3mm; white-space: pre-wrap; break-inside: avoid; }
+  .term { display: grid; grid-template-columns: 26mm 1fr; gap: 2mm 4mm; margin: 3mm 0; break-inside: avoid; }
+  .term .tag { font-weight: bold; background: var(--accent); color: #fff; border-radius: 1.5mm; padding: 1.5mm 2mm; text-align: center; align-self: start; font-size: 9pt; }
+  .term .body p { margin: 0 0 1.5mm; }
+  .note { background: var(--warn); border-left: 3px solid var(--warnline); padding: 2mm 3mm; margin: 3mm 0; break-inside: avoid; }
+  table { border-collapse: collapse; width: 100%; margin: 2mm 0 3mm; break-inside: avoid; }
+  th, td { border: 1px solid var(--line); padding: 1.5mm 2.5mm; text-align: left; vertical-align: top; }
+  th { background: #eef2f8; }
+  ol, ul { margin: 1mm 0 2mm; padding-left: 6mm; }
+  li { margin-bottom: 1mm; }
+  kbd { font-family: "DejaVu Sans Mono", monospace; font-size: 8.8pt; border: 1px solid #b8c0cc; border-bottom-width: 2px; border-radius: 1mm; padding: 0 1.2mm; background: #fafbfc; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 5mm; }
+  .footer { color: var(--muted); font-size: 8.5pt; margin-top: 8mm; border-top: 1px solid var(--line); padding-top: 2mm; }
+</style>
+</head>
+<body>
+
+<h1>JetRacer simulation: quick start</h1>
+<div class="sub">Run the Isaac Sim JetRacer with the robot's SLAM and Nav2 stack, give it goals, drive it by hand and reset it.
+All commands run in <code>~/workspaces/ros2_ws</code>.</div>
+
+<h2>1. Start (three terminals)</h2>
+
+<div class="term">
+  <div class="tag">Terminal 1<br>simulation</div>
+  <div class="body">
+<pre>./run_isaac_sim.sh</pre>
+    <p>Wait about a minute for <code>[jetracer_sim] running … in real time</code>.</p>
+    <p>The window opens on a camera in the room's upper corner, behind the car. Other views are in the
+    viewport's camera menu (camera icon, top left): <code>Top</code> (a plan of the whole room, oriented like RViz)
+    and <code>Corner_NE</code>, <code>Corner_NW</code>, <code>Corner_SW</code>, <code>Corner_SE</code>.</p>
+  </div>
+</div>
+
+<div class="note"><b>When the window asks "Save changes?" on close, always answer <i>Don't save</i>.</b>
+The furnished room, lights and camera wiring are added in memory on every start; saving writes them into the scene
+file and breaks the next start.</div>
+
+<div class="term">
+  <div class="tag">Terminal 2<br>robot software</div>
+  <div class="body">
+<pre>./run_sim_slam.sh --nav --teleop</pre>
+    <p>SLAM, the occupancy map and Nav2. Wait for these two lines:</p>
+    <ol>
+      <li><code>[grid] camera mount fitted to the floor …</code></li>
+      <li><code>Managed nodes are active</code>, which means Nav2 is ready.</li>
+    </ol>
+    <p>Before that, <code>Timed out waiting for transform … odom</code> is normal. Don't drive yet.</p>
+  </div>
+</div>
+
+<div class="term">
+  <div class="tag">Terminal 3<br>keyboard + RViz</div>
+  <div class="body">
+<pre>ROS_DOMAIN_ID=31 ./run_teleop.sh sim</pre>
+    <p>Opens RViz and drives the car from the keyboard. If you only want to watch:
+    <code>ROS_DOMAIN_ID=31 ./run_rviz.sh sim</code> opens RViz alone.</p>
+  </div>
+</div>
+
+<p>Wait about 5 seconds after Nav2 is ready before sending the first goal.</p>
+
+<h2>2. Give a goal</h2>
+<ol>
+  <li>In RViz, click <b>2D Goal Pose</b> in the top toolbar.</li>
+  <li>Click the spot on the map where the car should go. Keep the mouse button down, drag in the direction the car
+  should face at the end, and release.</li>
+</ol>
+
+<p><b>Where you are on the map:</b> the map's origin is where the car was when terminal 2 started, which is the
+room centre, facing +x (the red axis). The room runs from −3 to +3 m in both directions, and the furniture stands
+along the walls.</p>
+
+<h3>What you'll see</h3>
+<table>
+  <tr><th style="width:28mm">The plan</th><td>A path appears at once. Space the car hasn't seen yet counts as free, so the path may cross it.</td></tr>
+  <tr><th>Driving</th><td>The car moves at about 0.15 m/s. It can reverse, and it turns in arcs, not on the spot.</td></tr>
+  <tr><th>New obstacles</th><td>When the camera sees something in the way (within 1 m), it appears on the map and the path changes to go around it.</td></tr>
+  <tr><th>Finished</th><td>Terminal 2 prints <code>Reached the goal!</code>. The car counts as arrived within 10 cm of the point; the final heading only has to be within about 35°.</td></tr>
+</table>
+
+<h3>Good first goals</h3>
+<ul>
+  <li><b>1.2 m straight ahead, facing forward.</b> Easy.</li>
+  <li><b>0.8 m behind the start, facing backwards.</b> The car has to turn around.</li>
+  <li><b>About 1.6 m to the right (−y), facing −y.</b> The path goes around the grey bin.</li>
+</ul>
+
+<h2>3. More goals</h2>
+<table>
+  <tr><th style="width:42mm">Next goal after it arrives</th><td>Click <b>2D Goal Pose</b> again and set the next goal. No reset is needed; the map and position carry on.</td></tr>
+  <tr><th>Change goal while driving</th><td>Just give a new goal. It replaces the current one straight away.</td></tr>
+  <tr><th>Stop a goal without a new one</th><td>Run this in any terminal; the car stops:
+<pre>source /opt/ros/humble/setup.bash
+ROS_DOMAIN_ID=31 ros2 service call /sim/navigate_to_pose/_action/cancel_goal \
+    action_msgs/srv/CancelGoal "{}"</pre>
+  If anything goes wrong, <kbd>Ctrl</kbd>+<kbd>C</kbd> in terminal 2 stops all driving at once.</td></tr>
+</table>
+
+<div style="break-inside: avoid">
+<h2>4. Drive by hand</h2>
+<p>Only drive by hand when no goal is active; otherwise Nav2 and the keyboard both send commands.
+Click on terminal 3 first so it gets the keys. Hold a key to keep moving; the car stops about 0.7 s after you let go.</p>
+
+<div class="two">
+<table>
+  <tr><th>Key</th><th>Action</th></tr>
+  <tr><td><kbd>↑</kbd> or <kbd>w</kbd></td><td>forward</td></tr>
+  <tr><td><kbd>↓</kbd> or <kbd>s</kbd></td><td>backward</td></tr>
+  <tr><td><kbd>←</kbd> <kbd>→</kbd> or <kbd>a</kbd> <kbd>d</kbd></td><td>arc left / right in the last direction (forward at start and after space)</td></tr>
+  <tr><td><kbd>q</kbd> / <kbd>e</kbd></td><td>forward arc left / right</td></tr>
+  <tr><td><kbd>z</kbd> / <kbd>c</kbd></td><td>backward arc left / right</td></tr>
+  <tr><td><kbd>space</kbd></td><td>stop</td></tr>
+  <tr><td><kbd>+</kbd> / <kbd>-</kbd></td><td>faster / slower</td></tr>
+</table>
+<div>
+  <p>Holding <kbd>↑</kbd> and then pressing <kbd>←</kbd> keeps the car moving and curves it left (a terminal repeats only
+  the last key held).</p>
+  <p>Letter keys need an English keyboard layout; arrows work in any layout.</p>
+  <p><b>Recovering:</b> driving by hand is how you get out if the car is stuck or tracking is lost. In that case
+  terminal 2 prints <code>[nav] no SLAM pose … holding the car still</code>. Back away from the wall until the camera
+  view in RViz says <code>TRACKING</code> again.</p>
+</div>
+</div>
+</div>
+
+<h2>5. Reset</h2>
+<h3>Restart SLAM only (the car stays where it is)</h3>
+<ol>
+  <li><kbd>Ctrl</kbd>+<kbd>C</kbd> in terminal 2.</li>
+  <li>Run <code>./run_sim_slam.sh --nav --teleop</code> again.</li>
+</ol>
+<p>The map starts empty, and the car's <b>current</b> position becomes the new origin. Goal coordinates now count from there.</p>
+
+<h3>Full reset (the car goes back to the room centre)</h3>
+<ol>
+  <li><kbd>Ctrl</kbd>+<kbd>C</kbd> in terminal 2.</li>
+  <li>Close Isaac: <kbd>Ctrl</kbd>+<kbd>C</kbd> in terminal 1, or close the window and answer <b>Don't save</b>.</li>
+  <li>Start terminal 1, wait for <code>running</code>, then start terminal 2.</li>
+</ol>
+<p>RViz (terminal 3) can stay open through both kinds of reset.</p>
+
+<div class="note">If you're doing several runs in a row, check that nothing is left over before restarting:
+<pre>pgrep -fa "orb_slam3_node|planner_server"</pre>
+It should print nothing. Leftover processes fight over the same topics. If Nav2 ever prints
+<code>GridBased: failed to create plan, exceeded maximum iterations</code> on an empty map, stop everything, check
+with this command, and start again.</div>
+
+<h2>6. Options</h2>
+<table>
+  <tr><th style="width:62mm">Command</th><th>What it does</th></tr>
+  <tr><td><code>./run_isaac_sim.sh --headless</code></td><td>no window (faster)</td></tr>
+  <tr><td><code>./run_isaac_sim.sh --plain-room</code></td><td>the original bare room (no furniture, ceiling or panel lights)</td></tr>
+  <tr><td><code>./run_isaac_sim.sh --light 8000</code></td><td>dimmer or brighter ceiling panels (default 12000)</td></tr>
+  <tr><td><code>./run_sim_slam.sh --nav-wheels</code></td><td>navigate on "wheel odometry", which in the simulation is the true pose (for comparison with SLAM)</td></tr>
+  <tr><td><code>./run_sim_slam.sh</code> (no <code>--nav</code>)</td><td>SLAM and the map only, no Nav2</td></tr>
+</table>
+<p>All terminals that talk to the simulation need <code>ROS_DOMAIN_ID=31</code>; the scripts in terminals 1 and 2 set it themselves.
+The full reference is in the ros2_ws <code>README.md</code> (sections 3 and 9).</p>
+
+<div class="footer">ros2_ws · jetracer_sim · 2026-10-10</div>
+</body>
+</html>

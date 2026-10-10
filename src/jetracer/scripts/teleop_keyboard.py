@@ -12,8 +12,9 @@ example when Wi-Fi drops).
   w / s  or  arrow up / down     forward / backward
   q / e                          forward while turning left / right
   z / c                          backward while turning left / right
-  a / d  or  arrow left / right  turn left / right without driving (a car
-                                 only steers its front wheels: use q/e/z/c)
+  a / d  or  arrow left / right  steer left / right while driving in the
+                                 last direction (forward at start and after
+                                 space): a car cannot turn on the spot
   space or x                     stop
   + / -                          faster / slower (capped by max_linear, max_angular)
   Ctrl-C                         quit (sends stop)
@@ -36,8 +37,8 @@ from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
 
 # key -> (linear sign, angular sign)
-KEYS = {'w': (1, 0), 's': (-1, 0), 'a': (0, 1), 'd': (0, -1),
-        'q': (1, 1), 'e': (1, -1), 'z': (-1, 1), 'c': (-1, -1)}
+KEYS = {'w': (1, 0), 's': (-1, 0), 'q': (1, 1), 'e': (1, -1), 'z': (-1, 1), 'c': (-1, -1)}
+STEER = {'a': 1, 'd': -1}   # sign of the turn; driven in the last direction
 ARROWS = {'A': 'w', 'B': 's', 'D': 'a', 'C': 'd'}   # ESC [ A..D
 
 
@@ -55,6 +56,7 @@ class KeyboardTeleop(Node):
         self.turn = min(self.turn, self.max_ang)
         self.pub = self.create_publisher(Twist, f'/{self.agent}/cmd_vel', 10)
         self.dir = (0, 0)
+        self.last_dir = 1        # last driving direction, for a / d
         self.last_key = 0.0
 
     def command(self):
@@ -65,11 +67,15 @@ class KeyboardTeleop(Node):
         return t
 
     def key(self, k):
-        if k in KEYS:
-            self.dir = KEYS[k]
+        if k in KEYS or k in STEER:
+            # A terminal repeats only the last key held: holding up and then
+            # left sends only 'left', which therefore keeps the car moving.
+            self.dir = KEYS[k] if k in KEYS else (self.last_dir, STEER[k])
+            self.last_dir = self.dir[0]
             self.last_key = time.monotonic()
         elif k in (' ', 'x'):
             self.dir = (0, 0)
+            self.last_dir = 1
         elif k in ('+', '='):
             self.scale(1.25)
         elif k in ('-', '_'):
