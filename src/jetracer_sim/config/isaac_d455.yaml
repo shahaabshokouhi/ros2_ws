@@ -1,0 +1,82 @@
+%YAML:1.0
+
+#--------------------------------------------------------------------------------------------
+# Camera Parameters — Isaac Sim RealSense D455 colour camera on the JetRacer
+# (jetracer3.usd: focal 1.93 mm, horizontal aperture 3.896 mm, 640x480,
+# no distortion). RGB-D without IMU; everything below the camera block is
+# ~/realsense3.yaml.
+#--------------------------------------------------------------------------------------------
+File.version: "1.0"
+
+Camera.type: "PinHole"
+
+# Camera calibration and distortion parameters (OpenCV)
+Camera1.fx: 317.043
+Camera1.fy: 317.043
+Camera1.cx: 320.0
+Camera1.cy: 240.0
+
+# distortion parameters
+Camera1.k1: 0.0
+Camera1.k2: 0.0
+Camera1.p1: 0.0
+Camera1.p2: 0.0
+
+# Camera resolution
+Camera.width: 640
+Camera.height: 480
+
+# Camera frames per second
+Camera.fps: 30
+
+# Color order of the images (0: BGR, 1: RGB. It is ignored if images are grayscale)
+Camera.RGB: 1
+
+# Close/Far threshold. Baseline times.
+# Effective close-point range = Stereo.b * Stereo.ThDepth = 0.050 * 53 = 2.65 m,
+# matching the ORB-SLAM2 setup (bf/fx * ThDepth = 40/606 * 40 = 2.64 m).
+# With 40 (2.0 m) the close-point starvation caused keyframe spam
+# (~5 KFs/sec while stationary) and constant TrackLocalMap failures.
+Stereo.ThDepth: 53.0
+# Physical stereo baseline of the D435i in meters
+Stereo.b: 0.050
+
+# Depth map values factor: rgbd_live feeds depth in meters (CV_32F), so 1.0
+RGBD.DepthMapFactor: 1.0
+
+#--------------------------------------------------------------------------------------------
+# ORB Parameters
+#--------------------------------------------------------------------------------------------
+# ORB Extractor: Number of features per image
+# Raised 1000 -> 1500 so more map points survive a rotation. If the Orin Nano
+# can no longer hold a steady 30 fps, lower this first.
+ORBextractor.nFeatures: 1500
+
+# ORB Extractor: Scale factor between levels in the scale pyramid
+ORBextractor.scaleFactor: 1.2
+
+# ORB Extractor: Number of levels in the scale pyramid
+# 8 -> 10: keeps features across scale changes. Revert to 8 if fps drops.
+ORBextractor.nLevels: 10
+
+# ORB Extractor: Fast threshold
+# Lowered (20/7 -> 10/4): the main lever for turns. During a rotation the
+# camera often faces a blanker wall; a lower FAST threshold still finds
+# corners on weak texture, so tracking keeps enough real inliers instead of
+# starving below the ~30-inlier TrackLocalMap gate and getting lost.
+ORBextractor.iniThFAST: 10
+ORBextractor.minThFAST: 4
+
+#--------------------------------------------------------------------------------------------
+# Viewer Parameters
+#--------------------------------------------------------------------------------------------
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500.0

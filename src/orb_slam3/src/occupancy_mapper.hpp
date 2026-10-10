@@ -41,6 +41,13 @@
 //                        going for a moment if vision drops out.
 //               Either way the wheel odometry on /<agent>/odom still gives
 //               Nav2 the robot's speed.
+//               Safety gate: Nav2's velocity commands come in on
+//               /<agent>/cmd_vel_gate_in and leave on /<agent>/cmd_vel only
+//               while the SLAM pose is fresh (pose_source slam). TF hands out
+//               the last pose however old it is, so after a tracking loss
+//               Nav2 would keep steering on a frozen position (seen in
+//               simulation: the car drove on to 11 cm from a wall). Keyboard
+//               teleop publishes on /<agent>/cmd_vel directly and is not gated.
 // /<agent>/orb_slam3/odom (nav_msgs/Odometry) is the SLAM pose of
 // base_footprint; /<agent>/orb_slam3/scan (sensor_msgs/LaserScan) the live
 // obstacle scan for Nav2's local costmap. /<agent>/odom is the wheel odometry.
@@ -49,6 +56,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <geometry_msgs/msg/twist.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
@@ -63,6 +71,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <limits>
@@ -97,6 +106,11 @@ struct GridParams {
     double camHeight         = 0.05;   // m above the floor
     double camPitchDeg       = 0.0;    // + = looking down
     double camRollDeg        = 0.0;
+    double mapHalfSize       = 0.0;    // the map covers at least +-this around the start (m);
+                                       // with Nav2 treating unknown as free, goals anywhere
+                                       // in it are plannable from the first second
+    double mapMargin         = 2.0;    // unknown margin around what was seen (m), so
+                                       // Nav2 goals just past the explored area are on the map
     double cameraForward     = 0.21;   // camera ahead of the rear axle (m)
     double cameraLeft        = 0.0;    // camera left of the car's centre line (m)
     double scanRate          = 10.0;   // Hz of the live LaserScan
@@ -135,6 +149,8 @@ struct GridParams {
         p.baseFrame        = n->declare_parameter("grid.base_frame", p.baseFrame);
         p.scanFrame        = n->declare_parameter("grid.scan_frame", p.scanFrame);
         p.odomFrame        = n->declare_parameter("grid.odom_frame", p.odomFrame);
+        p.mapMargin        = n->declare_parameter("grid.map_margin", p.mapMargin);
+        p.mapHalfSize      = n->declare_parameter("grid.map_half_size", p.mapHalfSize);
         p.cameraForward    = n->declare_parameter("grid.camera_forward", p.cameraForward);
         p.cameraLeft       = n->declare_parameter("grid.camera_left", p.cameraLeft);
         p.scanRate         = n->declare_parameter("grid.scan_rate", p.scanRate);
@@ -163,7 +179,13 @@ public:
         scan_pub_ = node_->create_publisher<sensor_msgs::msg::LaserScan>(
             agent + "/orb_slam3/scan", rclcpp::SensorDataQoS());
         static_tf_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*node_);
-        if (p_.navFrames) tf_ = std::make_unique<tf2_ros::TransformBroadcaster>(*node_);
+        if (p_.navFrames) {
+            tf_ = std::make_unique<tf2_ros::TransformBroadcaster>(*node_);
+            cmd_out_ = node_->create_publisher<geometry_msgs::msg::Twist>(agent + "/cmd_vel", 10);
+            cmd_in_ = node_->create_subscription<geometry_msgs::msg::Twist>(
+                agent + "/cmd_vel_gate_in", 10,
+                [this](geometry_msgs::msg::Twist::ConstSharedPtr m) { gateCommand(*m); });
+        }
         if (p_.navFrames && p_.poseSource == "wheels") {
             // Wheel odometry of the base driver: odom -> base_footprint.
             wheel_sub_ = node_->create_subscription<nav_msgs::msg::Odometry>(
@@ -217,12 +239,22 @@ public:
         if (!ref) return;
 
         const Sophus::SE3f Twc = Tcw.inverse();
-        ORB_SLAM3::Map* pMain = slam_->GetMainMap();
+        if (!firstMap_) firstMap_ = ref->GetMap();
+        ORB_SLAM3::Map* pMain = navMap();
+        if (p_.navFrames && !(pMain && ref->GetMap() == pMain)) {
+            // Lost and re-started in a temporary map: no pose for Nav2 (the
+            // safety gate holds the car) until the map merges back.
+            RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+                "[nav] SLAM is in a temporary map (tracking was lost): no robot pose for Nav2 "
+                "until it merges back into the map it started in");
+        }
         if (pMain && ref->GetMap() == pMain) {
             publishOdom(Twc, stamp);
             if (p_.navFrames) {
                 if (p_.poseSource == "slam") publishSlamBase(Twc, stamp);
                 else updateCorrection(Twc, t);
+                lastPoseWall_ = std::chrono::steady_clock::now();   // safety gate
+                havePose_ = true;
             }
         }
 
@@ -560,6 +592,22 @@ private:
         tf_->sendTransform(m);
     }
 
+    // Pass Nav2's command on only while the SLAM pose is fresh; otherwise stop.
+    void gateCommand(const geometry_msgs::msg::Twist& m)
+    {
+        const double age = havePose_.load()
+            ? std::chrono::duration<double>(std::chrono::steady_clock::now() - lastPoseWall_.load()).count()
+            : 1e9;
+        if (p_.poseSource == "slam" && age > 0.3) {
+            RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
+                "[nav] no SLAM pose for %.1f s (tracking lost, or not in the main map): "
+                "holding the car still; keyboard teleop still works", age > 1e8 ? -1.0 : age);
+            cmd_out_->publish(geometry_msgs::msg::Twist());
+            return;
+        }
+        cmd_out_->publish(m);
+    }
+
     void publishCorrection()
     {
         Pose2D c;
@@ -660,9 +708,23 @@ private:
         }
     }
 
-    void render()
+    // The map the robot navigates and maps in: SLAM's main map once it has
+    // qualified (20 keyframes), before that the first map of this run, so the
+    // pose and the grid exist from the first frames instead of only after the
+    // robot has driven enough for the main map. Normally the first map is the
+    // one that qualifies, so nothing jumps; if it is abandoned first, the
+    // pose pauses until the main map exists.
+    ORB_SLAM3::Map* navMap()
     {
         ORB_SLAM3::Map* pMain = slam_->GetMainMap();
+        if (pMain) return pMain;
+        ORB_SLAM3::Map* pFirst = firstMap_.load();
+        return (pFirst && !pFirst->IsBad()) ? pFirst : nullptr;
+    }
+
+    void render()
+    {
+        ORB_SLAM3::Map* pMain = navMap();
         if (!pMain) return;
         std::vector<std::shared_ptr<const Scan>> scans;
         {
@@ -694,13 +756,19 @@ private:
         if (poses.empty()) return;
 
         const float res  = (float)p_.resolution;
-        const float pad  = (float)p_.maxRange + 2.f * res;
+        // Nav2's global costmap takes the map's size, and its planner cannot
+        // aim outside it: without a margin a goal just past where the camera
+        // looked (or the car's own outline there) was rejected as unreachable.
+        const float pad  = (float)(p_.maxRange + p_.mapMargin) + 2.f * res;
         float minx = 1e9f, miny = 1e9f, maxx = -1e9f, maxy = -1e9f;
         for (const auto& p : poses) {
             minx = std::min(minx, p.x); maxx = std::max(maxx, p.x);
             miny = std::min(miny, p.y); maxy = std::max(maxy, p.y);
         }
         minx -= pad; miny -= pad; maxx += pad; maxy += pad;
+        const float hs = (float)p_.mapHalfSize;           // fixed minimum extent around the start
+        minx = std::min(minx, -hs); miny = std::min(miny, -hs);
+        maxx = std::max(maxx, hs);  maxy = std::max(maxy, hs);
         const int W = (int)std::ceil((maxx - minx) / res);
         const int H = (int)std::ceil((maxy - miny) / res);
         if (W <= 0 || H <= 0 || (long)W * H > 25000000L) {
@@ -780,6 +848,11 @@ private:
 
     // Navigation frames (nav_frames only).
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_;
+    rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_out_;
+    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_in_;
+    std::atomic<std::chrono::steady_clock::time_point> lastPoseWall_{std::chrono::steady_clock::time_point{}};
+    std::atomic<bool> havePose_{false};
+    std::atomic<ORB_SLAM3::Map*> firstMap_{nullptr};
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr wheel_sub_;
     rclcpp::TimerBase::SharedPtr corr_timer_;
     std::mutex nav_mx_;

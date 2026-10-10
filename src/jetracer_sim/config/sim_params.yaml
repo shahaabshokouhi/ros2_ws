@@ -1,0 +1,10 @@
+# orb_slam3_node parameters for the Isaac Sim JetRacer (jetracer3.usd),
+# loaded on top of the launch defaults (orb_slam3.launch.py extra_params).
+# Measured in the scene: rear axle 0.070 m behind the car's centre, colour
+# camera 0.110 m ahead of it and 0.0115 m to the right, 0.0615 m above the
+# floor, looking level and forward.
+/**:
+  ros__parameters:
+    grid.camera_forward: 0.180          # camera ahead of the rear axle (real car: 0.21)
+    grid.camera_left: -0.0115           # camera right of the centre line
+    grid.nominal_camera_height: 0.0615  # floor-fit sanity check (real car: 0.05)

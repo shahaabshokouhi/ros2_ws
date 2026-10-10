@@ -108,6 +108,18 @@ def generate_launch_description():
                         'drives and reports speed); wheels: wheel odometry, corrected by SLAM'
         ),
         DeclareLaunchArgument(
+            'camera',
+            default_value='true',
+            description='Start the RealSense driver (false when the images come from '
+                        'elsewhere, e.g. Isaac Sim through jetracer_sim)'
+        ),
+        DeclareLaunchArgument(
+            'extra_params',
+            default_value='',
+            description='Optional YAML file of orb_slam3_node parameters applied on top '
+                        '(e.g. grid.camera_forward for a different car)'
+        ),
+        DeclareLaunchArgument(
             'port_name',
             default_value='/dev/ttyACM0',
             description='Serial port of the jetracer motor board (base driver)'
@@ -137,6 +149,9 @@ def launch_nodes(context):
     teleop_driver   = LaunchConfiguration('teleop_driver').perform(context).strip().lower() \
         in ('true', '1', 'yes', 'on')
     port_name       = LaunchConfiguration('port_name').perform(context)
+    camera          = LaunchConfiguration('camera').perform(context).strip().lower() \
+        in ('true', '1', 'yes', 'on')
+    extra_params    = LaunchConfiguration('extra_params').perform(context).strip()
     nav             = LaunchConfiguration('nav').perform(context).strip().lower() \
         in ('true', '1', 'yes', 'on')
     nav_pose        = LaunchConfiguration('nav_pose').perform(context).strip().lower()
@@ -244,12 +259,13 @@ def launch_nodes(context):
             {'use_imu': use_imu},
             {'occupancy_grid': occupancy_grid or nav},
             {'nav_frames': nav},
+            {'grid.map_half_size': 10.0 if nav else 0.0},   # nav: a 20 x 20 m map from the start
             {'grid.pose_source': nav_pose},
             {'publish_gray': teleop},
-        ],
+        ] + ([extra_params] if extra_params else []),
     )
 
-    nodes = [realsense_node, slam_node]
+    nodes = ([realsense_node] if camera else []) + [slam_node]
 
     if launch_monitor:
         monitor_node = Node(
@@ -310,9 +326,11 @@ def nav2_nodes(agent):
     return [
         nav_node('nav2_planner', 'planner_server'),
         nav_node('nav2_controller', 'controller_server', [('cmd_vel', 'cmd_vel_nav')]),
+        # Commands reach /<agent>/cmd_vel through the SLAM node's safety gate
+        # (cmd_vel_gate_in), which stops the car while the SLAM pose is stale.
         nav_node('nav2_velocity_smoother', 'velocity_smoother',
-                 [('cmd_vel', 'cmd_vel_nav'), ('cmd_vel_smoothed', 'cmd_vel')]),
-        nav_node('nav2_behaviors', 'behavior_server'),
+                 [('cmd_vel', 'cmd_vel_nav'), ('cmd_vel_smoothed', 'cmd_vel_gate_in')]),
+        nav_node('nav2_behaviors', 'behavior_server', [('cmd_vel', 'cmd_vel_gate_in')]),
         nav_node('nav2_bt_navigator', 'bt_navigator'),
         Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
              name='lifecycle_manager_navigation', namespace=agent, output='screen',

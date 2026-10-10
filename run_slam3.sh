@@ -114,6 +114,7 @@ echo "Jetson monitor: $MONITOR (${MONITOR_RATE} Hz)"
 echo "Occupancy grid: $OCCUPANCY_GRID"
 echo "Teleop: $TELEOP"
 echo "Navigation: $NAV (robot pose from: $NAV_POSE)"
+[ "$NAV" = "true" ] && echo "  Nav2 starts once the floor is calibrated (keep the floor in view, a few seconds)."
 
 colcon build --packages-select orb_slam3 --cmake-clean-cache
 source install/setup.bash

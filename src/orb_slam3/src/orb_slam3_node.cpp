@@ -364,13 +364,22 @@ private:
             RCLCPP_ERROR(this->get_logger(), "OpenCV exception (color): %s", e.what());
         }
 
-        // Process depth image
+        // Process depth image: 16UC1 millimetres from the RealSense, or 32FC1
+        // metres (e.g. Isaac Sim through jetracer_sim); invalid depth -> 0.
         try {
-            auto cv_ptr = cv_bridge::toCvShare(depth_msg, sensor_msgs::image_encodings::TYPE_16UC1);
+            if (depth_msg->encoding == sensor_msgs::image_encodings::TYPE_32FC1) {
+                auto cv_ptr = cv_bridge::toCvShare(depth_msg);
+                depth_normalized = cv_ptr->image.clone();
+                cv::patchNaNs(depth_normalized, 0.0);
+                depth_normalized.setTo(0.0f, (depth_normalized > 65.0f) | (depth_normalized < 0.0f));
+                if (save_keyframes_) depth_normalized.convertTo(depth_raw16, CV_16UC1, 1000.0);
+            } else {
+                auto cv_ptr = cv_bridge::toCvShare(depth_msg, sensor_msgs::image_encodings::TYPE_16UC1);
 
-            if (save_keyframes_) depth_raw16 = cv_ptr->image.clone();
-            cv_ptr->image.convertTo(depth_normalized, CV_32FC1, 1.0 / 1000.0);
-            depth_normalized.setTo(0.0f, cv_ptr->image == 0);
+                if (save_keyframes_) depth_raw16 = cv_ptr->image.clone();
+                cv_ptr->image.convertTo(depth_normalized, CV_32FC1, 1.0 / 1000.0);
+                depth_normalized.setTo(0.0f, cv_ptr->image == 0);
+            }
         } catch (cv_bridge::Exception& e) {
             RCLCPP_ERROR(this->get_logger(), "cv_bridge exception (depth): %s", e.what());
         }
