@@ -113,6 +113,12 @@ set_input(odom + '/ros2_publish_raw_transform_tree', 'childFrameId', 'gt_base_li
 # aligned_depth_to_color), every second rendered frame = 30 Hz.
 K = og.Controller.Keys
 rs = A + '/camera/realsense2_camera/color/'
+# A scene saved from a previous run (Isaac's "save changes?" on close)
+# already holds this graph, possibly with old settings: rebuild it.
+if ctx.get_stage().GetPrimAtPath(CAR + '/ROS_Camera').IsValid():
+    ctx.get_stage().RemovePrim(CAR + '/ROS_Camera')
+    app.update()
+    print('[jetracer_sim] replaced the ROS_Camera graph saved in the scene', flush=True)
 og.Controller.edit(
     {'graph_path': CAR + '/ROS_Camera', 'evaluator_name': 'execution'},
     {
