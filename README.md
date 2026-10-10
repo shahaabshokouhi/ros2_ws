@@ -8,10 +8,10 @@ on a simulated car.
 
 The SLAM library itself, including all multi-robot map sharing, lives in the
 companion repository **ORB_SLAM3**: `~/ORB_SLAM3`
-([github.com/shahaabshokouhi/ORB_SLAM3](https://github.com/shahaabshokouhi/ORB_SLAM3/tree/kf-sharing)).
+([github.com/shahaabshokouhi/ORB_SLAM3](https://github.com/shahaabshokouhi/ORB_SLAM3/tree/master)).
 Its README explains the library, the multi-robot methods and their `MA_NEW_*`
 settings, the build scripts and the offline evaluation harness. Both repos
-are developed on the branch **`kf-sharing`**. Always pull and rebuild **both**
+have their work on their main branch (ORB_SLAM3: **`master`**, ros2_ws: **`main`**). Always pull and rebuild **both**
 on every machine: a robot running an older message layout or library silently
 drops the other robots' messages.
 
@@ -53,7 +53,7 @@ need first.
 | Follow Vicon waypoints | `./run_controller.sh` | |
 | Fix a wedged RealSense ("Frames didn't arrive") | `./reset_camera.sh` | |
 | Test the whole stack in Isaac Sim | — | terminal 1 `./run_isaac_sim.sh`; terminal 2 `./run_sim_slam.sh --nav --teleop`; then `ROS_DOMAIN_ID=31 ./run_rviz.sh sim` and/or `ROS_DOMAIN_ID=31 ./run_teleop.sh sim` |
-| Evaluate the sharing method offline on recorded data | — | `~/ORB_SLAM3/eval/kf_sharing/run_replay.sh` ([its README](https://github.com/shahaabshokouhi/ORB_SLAM3/blob/kf-sharing/eval/kf_sharing/README.md)) |
+| Evaluate the sharing method offline on recorded data | — | `~/ORB_SLAM3/eval/kf_sharing/run_replay.sh` ([its README](https://github.com/shahaabshokouhi/ORB_SLAM3/blob/master/eval/kf_sharing/README.md)) |
 
 Flags can be combined, for example `./run_slam3.sh --method new --grid --teleop`.
 `--teleop` and `--nav` are **single-robot** features: they start the motor
@@ -320,7 +320,7 @@ JetRacer.
 
 The keyframe-sharing method is tuned with environment variables, not
 parameters. They are listed in the
-[ORB_SLAM3 README](https://github.com/shahaabshokouhi/ORB_SLAM3/blob/kf-sharing/README.md#multi-robot-settings-ma_new_).
+[ORB_SLAM3 README](https://github.com/shahaabshokouhi/ORB_SLAM3/blob/master/README.md#multi-robot-settings-ma_new_).
 
 ---
 
