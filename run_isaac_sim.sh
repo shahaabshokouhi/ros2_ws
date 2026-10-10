@@ -2,7 +2,7 @@
 # Isaac Sim stand-in for one JetRacer (jetracer_sim). Start this first, then
 # ./run_sim_slam.sh in another terminal.
 #
-#   ./run_isaac_sim.sh [--headless] [--agent sim] [--usd FILE] [--no-realtime]
+#   ./run_isaac_sim.sh [--headless] [--agent sim] [--usd FILE] [--no-realtime] [--plain-room] [--light N]
 #
 # Uses ROS domain $SIM_DOMAIN (default 31) so the simulated robot never mixes
 # with real robots on the lab network; RViz and teleop need the same:

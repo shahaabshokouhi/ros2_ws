@@ -191,7 +191,8 @@ by default; the simulation starts playing once the terminal prints
 | `--agent NAME` | `sim` | robot name (topic prefix) |
 | `--usd FILE` | `~/Jetracer/jetracer3.usd` | scene |
 | `--no-realtime` | off | run as fast as possible (default: paced to real time; images use the computer's clock) |
-| `--light I` | 1000 | even dome light (0 = none). The scene lights only the area around the start, and the camera cannot track in the dark beyond it. |
+| `--plain-room` | off | leave the room as the `.usd` has it: bare walls, sun light, no ceiling (default: furnished for visual SLAM, see [§9](#9-how-the-isaac-sim-stand-in-works)) |
+| `--light I` | 12000 | brightness of each of the 9 ceiling panels; with `--plain-room`: an even dome light (default 1000, 0 = none), without which the bare room is dark beyond ~1 m |
 | `--max-steer RAD` | 0.59 | steering limit (the real car: 0.6) |
 | `--width`, `--height` | 640, 480 | camera resolution (the ORB-SLAM3 settings assume 640×480) |
 
@@ -452,7 +453,19 @@ Config: `src/orb_slam3/config/nav2_jetracer.yaml`,
 * `run_isaac.py` opens the scene and adjusts it:
   * moves the camera's near clipping plane past the D455 housing model;
   * removes the camera's separate physics body;
-  * adds the dome light;
+  * furnishes the room (`room_dressing.py`, skipped with `--plain-room`):
+    the scene's room is bare plaster walls under a strong sun light, where
+    the camera, 5 cm above the floor, sees mostly flat grey and cannot track.
+    It adds textured overlays on the four walls (posters, whiteboard, big
+    stencilled zone letters, skirting, outlets, a door; every wall
+    different, so places can be recognised), a textured concrete floor over
+    the repeating checker, shelves with books and boxes, cabinets, crates
+    and box stacks along the walls (static colliders, the middle of the room
+    stays free), and a ceiling with 9 panel lights in place of the sun light.
+    Textures are drawn with PIL from fixed seeds (same room every run) and
+    cached in `~/.cache/jetracer_sim/textures_v1` (delete it after editing a
+    texture). Nothing is written to the `.usd`;
+  * with `--plain-room`, adds the dome light instead;
   * points the scene's drive and odometry graphs at the robot's topic names
     (odometry becomes **ground truth**, off `/tf`);
   * adds the camera graph (RGB + depth from the same camera, 30 Hz, system
@@ -467,6 +480,10 @@ Config: `src/orb_slam3/config/nav2_jetracer.yaml`,
 * Start-up: Nav2 is ready a few seconds after `run_sim_slam.sh`, once the
   floor is calibrated. The simulated car starts at the room centre facing +x.
   A toy truck and a mug sit about 0.5 m ahead on the left.
+* Never save the scene from the Isaac window after a run (answer "Don't
+  save" on close): everything above is applied in memory on every start, and
+  a saved copy carries the run's additions into the file. To change the
+  scene itself, open the `.usd` in plain Isaac Sim.
 
 ---
 
@@ -477,7 +494,7 @@ Config: `src/orb_slam3/config/nav2_jetracer.yaml`,
 | `src/orb_slam3/` | The ROS 2 node around the ORB-SLAM3 library (`src/orb_slam3_node.cpp`). Camera input, pose and map output, robot-to-robot messaging, keyframe dataset saving, evaluation logs. `src/occupancy_mapper.hpp`: grid, scans, navigation frames, safety gate. `launch/orb_slam3.launch.py`, `config/` (Nav2). |
 | `src/orbslam2_msgs/` | Messages shared by all robots (map points, keyframe adverts and data, ownership updates…). |
 | `src/jetracer/` | The car: motor/IMU driver `src/jetracer.cpp` (`/<agent>/cmd_vel` in, `odom`/`imu` out, stops after 1 s without commands); `scripts/teleop_keyboard.py` (`teleop`), `teleop_joy.py`, `pid_controller.py` (Vicon waypoints), `display_node.py` (OLED), `odom_ekf.py`; `jetracer/jetson_monitor.py`; `config/waypoints.yaml`. |
-| `src/jetracer_sim/` | Isaac Sim stand-in: `isaac/run_isaac.py`, `jetracer_sim/cmd_vel_to_ackermann.py`, `launch/sim.launch.py`, `config/`. |
+| `src/jetracer_sim/` | Isaac Sim stand-in: `isaac/run_isaac.py`, `isaac/room_dressing.py`, `jetracer_sim/cmd_vel_to_ackermann.py`, `launch/sim.launch.py`, `config/`. |
 | `src/orb_slam2/` | Legacy ORB-SLAM2 node. |
 | `robot_view.rviz` | RViz layout used by `run_rviz.sh` (`__AGENT__` is replaced). |
 
@@ -496,5 +513,6 @@ not tracked.
 | Nav2 prints `Timed out waiting for transform … odom` | Normal for the first seconds (floor calibration). If it persists, check the line above. |
 | Car stops during navigation, log says `[nav] no SLAM pose …` | Tracking lost: the safety gate holds the car. Back it away with teleop until SLAM relocalizes. |
 | `run_slam3.sh --nav` refuses to start | `run_joystick.sh` / `run_controller.sh` is running and publishes its own robot pose. Stop it, or use `--nav-wheels`. |
-| Simulation: black camera image or tracking lost after ~1 m | Use the defaults of `run_isaac_sim.sh` (clipping fix and dome light are applied automatically). |
+| Simulation: black camera image or tracking lost after ~1 m | Use the defaults of `run_isaac_sim.sh` (clipping fix, furnished room and lights are applied automatically). |
+| Simulation: Isaac exits at start, or the camera topic has 2 publishers / stray `/drive`, `/odom`, `/tf` | The `.usd` was saved after a run (possibly with the scene added twice). Restore the original file; see the note in [§9](#9-how-the-isaac-sim-stand-in-works). |
 | Simulation topics invisible | Use `ROS_DOMAIN_ID=31` (or `$SIM_DOMAIN`) in every terminal that talks to the simulation. |

@@ -3,10 +3,12 @@
 
 Run with Isaac Sim's Python (../run_isaac_sim.sh does that):
 
-    python run_isaac.py [--usd FILE] [--agent sim] [--headless] [--no-realtime]
+    python run_isaac.py [--usd FILE] [--agent sim] [--headless] [--no-realtime] [--plain-room]
 
-Opens the JetRacer scene (Ackermann car with a RealSense D455 in a room) and
-wires it to ROS 2 like the real robot:
+Opens the JetRacer scene (Ackermann car with a RealSense D455 in a room),
+furnishes the room so visual SLAM can track (room_dressing.py: textured walls
+and floor, shelves and boxes, a ceiling with panel lights; nothing is saved
+to the .usd) and wires it to ROS 2 like the real robot:
 
   /<agent>/camera/realsense2_camera/color/image_raw  rgb8, 640x480, 30 Hz
   /<agent>/camera/realsense2_camera/depth/image_rect_raw
@@ -33,10 +35,12 @@ ap.add_argument('--headless', action='store_true')
 ap.add_argument('--no-realtime', action='store_true', help='run as fast as possible')
 ap.add_argument('--width', type=int, default=640)
 ap.add_argument('--height', type=int, default=480)
-ap.add_argument('--light', type=float, default=1000.0,
-                help='intensity of an even dome light added to the room (0: none). The scene '
-                     'lights only the area around the start: the floor beyond ~1 m is black, '
-                     'and visual SLAM loses tracking there')
+ap.add_argument('--plain-room', action='store_true',
+                help='leave the room as the .usd has it (bare walls, sun light) instead of '
+                     'furnishing it for visual SLAM (room_dressing.py)')
+ap.add_argument('--light', type=float, default=None,
+                help='brightness of each of the 9 ceiling panels (default 12000); with '
+                     '--plain-room: of an even dome light (default 1000, 0: none)')
 ap.add_argument('--max-steer', type=float, default=0.59,
                 help='steering limit (rad); the real car has 0.6, the joints allow 0.59')
 args = ap.parse_args()
@@ -89,11 +93,20 @@ for prim in ctx.get_stage().GetPrimAtPath(CAR + '/base_link/Realsense').GetAllCh
                 p.RemoveAPI(api)
                 print(f'[jetracer_sim] removed {api.__name__} from {p.GetPath()}', flush=True)
 
-if args.light > 0:
+if not args.plain_room:
+    import os  # noqa: E402
+    import sys  # noqa: E402
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import room_dressing  # noqa: E402
+    for line in room_dressing.dress(ctx.get_stage(), args.light):
+        print(f'[jetracer_sim] room: {line}', flush=True)
+elif (1000.0 if args.light is None else args.light) > 0:
+    # The bare room is lit only around the start: the floor beyond ~1 m is
+    # black, and visual SLAM loses tracking there.
     from pxr import UsdLux  # noqa: E402
     dome = UsdLux.DomeLight.Define(ctx.get_stage(), '/World/jetracer_sim_dome_light')
-    dome.CreateIntensityAttr(args.light)
-    print(f'[jetracer_sim] added a dome light ({args.light:g})', flush=True)
+    dome.CreateIntensityAttr(1000.0 if args.light is None else args.light)
+    print(f'[jetracer_sim] added a dome light ({dome.GetIntensityAttr().Get():g})', flush=True)
 
 # Drive: the scene's Ackermann graph, on the robot's topic.
 drive = CAR + '/ROS_Ackermann_Drive'
