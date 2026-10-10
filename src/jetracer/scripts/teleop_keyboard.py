@@ -10,9 +10,10 @@ driver stops the motors on its own after 1 s without any command (for
 example when Wi-Fi drops).
 
   w / s  or  arrow up / down     forward / backward
-  a / d  or  arrow left / right  turn left / right on the spot
   q / e                          forward while turning left / right
   z / c                          backward while turning left / right
+  a / d  or  arrow left / right  turn left / right without driving (a car
+                                 only steers its front wheels: use q/e/z/c)
   space or x                     stop
   + / -                          faster / slower (capped by max_linear, max_angular)
   Ctrl-C                         quit (sends stop)

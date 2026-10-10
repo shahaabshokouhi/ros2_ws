@@ -1,3 +1,7 @@
+import os
+import tempfile
+
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
@@ -89,6 +93,21 @@ def generate_launch_description():
                         'run_joystick.sh / run_controller.sh already runs it)'
         ),
         DeclareLaunchArgument(
+            'nav',
+            default_value='false',
+            description='Single-robot navigation: occupancy grid, REP-105 frames '
+                        '(map_nav -> odom -> base_footprint), the base driver with its '
+                        'wheel odometry, and Nav2 (Hybrid-A* + pure pursuit for a car). '
+                        'Goals: RViz 2D Goal Pose on /<agent>/goal_pose'
+        ),
+        DeclareLaunchArgument(
+            'nav_pose',
+            default_value='slam',
+            description='With nav: where the robot pose for Nav2 comes from. slam: '
+                        'odom -> base_footprint is the SLAM pose (the base driver only '
+                        'drives and reports speed); wheels: wheel odometry, corrected by SLAM'
+        ),
+        DeclareLaunchArgument(
             'port_name',
             default_value='/dev/ttyACM0',
             description='Serial port of the jetracer motor board (base driver)'
@@ -118,6 +137,11 @@ def launch_nodes(context):
     teleop_driver   = LaunchConfiguration('teleop_driver').perform(context).strip().lower() \
         in ('true', '1', 'yes', 'on')
     port_name       = LaunchConfiguration('port_name').perform(context)
+    nav             = LaunchConfiguration('nav').perform(context).strip().lower() \
+        in ('true', '1', 'yes', 'on')
+    nav_pose        = LaunchConfiguration('nav_pose').perform(context).strip().lower()
+    if nav_pose not in ('slam', 'wheels'):
+        raise RuntimeError(f"nav_pose must be slam or wheels, not '{nav_pose}'")
 
     def tgt(suffix: str) -> str:
         # build "/<agent>/<suffix>"
@@ -218,7 +242,9 @@ def launch_nodes(context):
             {'tracking_rtprio': tracking_rtprio},
             {'ma_method': ma_method},
             {'use_imu': use_imu},
-            {'occupancy_grid': occupancy_grid},
+            {'occupancy_grid': occupancy_grid or nav},
+            {'nav_frames': nav},
+            {'grid.pose_source': nav_pose},
             {'publish_gray': teleop},
         ],
     )
@@ -238,10 +264,11 @@ def launch_nodes(context):
         )
         nodes.append(monitor_node)
 
-    if teleop and teleop_driver:
-        # Base driver: executes /<agent>/cmd_vel (sent by `ros2 run jetracer
-        # teleop` on another computer) and stops the motors by itself after
-        # 1 s without a command. Same settings as jetracer.launch.py.
+    if (teleop or nav) and teleop_driver:
+        # Base driver: executes /<agent>/cmd_vel (keyboard teleop or Nav2) and
+        # stops the motors by itself after 1 s without a command. Only with
+        # nav_pose:=wheels does it also publish odom -> base_footprint (with
+        # slam, SLAM publishes that frame; two publishers would fight).
         nodes.append(Node(
             package='jetracer',
             executable='jetracer',
@@ -249,9 +276,45 @@ def launch_nodes(context):
             output='screen',
             parameters=[
                 {'port_name': port_name},
-                {'publish_odom_transform': False},
+                {'publish_odom_transform': nav and nav_pose == 'wheels'},
                 {'agent_name': agent},
             ],
         ))
 
+    if nav:
+        nodes += nav2_nodes(agent)
+
     return nodes
+
+
+def nav2_nodes(agent):
+    """Nav2 for one car, in the robot's namespace but on the global /tf.
+
+    nav2_bringup's navigation_launch.py remaps /tf to a namespaced tf, where
+    nothing publishes in this system, so the nodes are started here instead.
+    """
+    share = get_package_share_directory('orb_slam3')
+    with open(os.path.join(share, 'config', 'nav2_jetracer.yaml')) as f:
+        text = f.read()
+    text = text.replace('__AGENT__', agent).replace(
+        '__BT_XML_POSES__', os.path.join(share, 'config', 'navigate_through_poses_car.xml')).replace(
+        '__BT_XML__', os.path.join(share, 'config', 'navigate_car.xml'))
+    params = os.path.join(tempfile.gettempdir(), f'nav2_{agent}.yaml')
+    with open(params, 'w') as f:
+        f.write(text)
+
+    def nav_node(pkg, exe, remaps=()):
+        return Node(package=pkg, executable=exe, name=exe, namespace=agent,
+                    output='screen', parameters=[params], remappings=list(remaps))
+
+    return [
+        nav_node('nav2_planner', 'planner_server'),
+        nav_node('nav2_controller', 'controller_server', [('cmd_vel', 'cmd_vel_nav')]),
+        nav_node('nav2_velocity_smoother', 'velocity_smoother',
+                 [('cmd_vel', 'cmd_vel_nav'), ('cmd_vel_smoothed', 'cmd_vel')]),
+        nav_node('nav2_behaviors', 'behavior_server'),
+        nav_node('nav2_bt_navigator', 'bt_navigator'),
+        Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
+             name='lifecycle_manager_navigation', namespace=agent, output='screen',
+             parameters=[params]),
+    ]

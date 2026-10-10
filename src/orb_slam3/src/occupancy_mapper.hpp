@@ -16,18 +16,41 @@
 //    instead of leaving doubled walls behind. Published as
 //    nav_msgs/OccupancyGrid on /<agent>/map.
 //
-// Frames (names are parameters): <grid.global_frame> (default map_nav) is the
-// level floor frame under the first camera pose, a static child of the
-// ORB-SLAM3 "map" frame; <grid.base_frame> (default base_link) is the level
-// floor frame under the camera, a static child of camera_color_optical_frame.
-// Nav2 can use map_nav as its global frame and base_link as the robot frame.
-// /<agent>/orb_slam3/odom (nav_msgs/Odometry) carries the same pose for Nav2
-// nodes that need an odometry topic (/<agent>/odom is the wheel odometry).
+// Frames (names are parameters):
+//   camera_floor   level frame on the floor under the camera (the scans' origin)
+//   base_footprint level frame on the floor under the REAR AXLE, the point a
+//                  car turns about: grid.camera_forward / grid.camera_left
+//                  behind the camera (JetRacer: 0.21 m, 0)
+//   map_nav        base_footprint at the start, a static child of ORB-SLAM3's
+//                  "map" frame; the global frame for Nav2
+// Two layouts, because a TF frame has exactly one parent:
+//   default:    map -> camera_color_optical_frame (the node, SLAM pose)
+//                 -> base_footprint, camera_floor (static, from the floor fit)
+//   nav_frames: map -> map_nav -> odom -> base_footprint -> camera_*  (REP 105)
+//               and the node stops publishing map -> camera. Same poses,
+//               different tree. Who provides the robot's pose
+//               (grid.pose_source):
+//                 slam   (default) odom -> base_footprint IS the SLAM pose,
+//                        published by this class every tracked frame;
+//                        map_nav -> odom is the identity. Nav2's controller
+//                        then steers on SLAM positions. The base driver must
+//                        not publish odom -> base_footprint.
+//                 wheels odom -> base_footprint is the base driver's wheel
+//                        odometry; this class publishes the SLAM correction
+//                        map_nav -> odom. Smoother between frames, and keeps
+//                        going for a moment if vision drops out.
+//               Either way the wheel odometry on /<agent>/odom still gives
+//               Nav2 the robot's speed.
+// /<agent>/orb_slam3/odom (nav_msgs/Odometry) is the SLAM pose of
+// base_footprint; /<agent>/orb_slam3/scan (sensor_msgs/LaserScan) the live
+// obstacle scan for Nav2's local costmap. /<agent>/odom is the wheel odometry.
 #pragma once
 
 #include <rclcpp/rclcpp.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <sensor_msgs/msg/laser_scan.hpp>
+#include <tf2_ros/transform_broadcaster.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <opencv2/core.hpp>
@@ -42,6 +65,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <random>
@@ -73,8 +97,15 @@ struct GridParams {
     double camHeight         = 0.05;   // m above the floor
     double camPitchDeg       = 0.0;    // + = looking down
     double camRollDeg        = 0.0;
+    double cameraForward     = 0.21;   // camera ahead of the rear axle (m)
+    double cameraLeft        = 0.0;    // camera left of the car's centre line (m)
+    double scanRate          = 10.0;   // Hz of the live LaserScan
+    bool   navFrames         = false;  // REP-105 tree for Nav2 (see top of file)
+    std::string poseSource   = "slam"; // nav_frames: "slam" or "wheels" (see top of file)
     std::string globalFrame  = "map_nav";
-    std::string baseFrame    = "base_link";
+    std::string baseFrame    = "base_footprint";
+    std::string scanFrame    = "camera_floor";
+    std::string odomFrame    = "odom";
     std::string cameraFrame  = "camera_color_optical_frame";
     std::string slamFrame    = "map";
 
@@ -102,6 +133,16 @@ struct GridParams {
         p.camRollDeg       = n->declare_parameter("grid.camera_roll_deg", p.camRollDeg);
         p.globalFrame      = n->declare_parameter("grid.global_frame", p.globalFrame);
         p.baseFrame        = n->declare_parameter("grid.base_frame", p.baseFrame);
+        p.scanFrame        = n->declare_parameter("grid.scan_frame", p.scanFrame);
+        p.odomFrame        = n->declare_parameter("grid.odom_frame", p.odomFrame);
+        p.cameraForward    = n->declare_parameter("grid.camera_forward", p.cameraForward);
+        p.cameraLeft       = n->declare_parameter("grid.camera_left", p.cameraLeft);
+        p.scanRate         = n->declare_parameter("grid.scan_rate", p.scanRate);
+        p.poseSource       = n->declare_parameter("grid.pose_source", p.poseSource);
+        if (p.poseSource != "slam" && p.poseSource != "wheels") {
+            RCLCPP_WARN(n->get_logger(), "[grid] pose_source '%s' unknown; using slam", p.poseSource.c_str());
+            p.poseSource = "slam";
+        }
         p.pixelStride      = std::max(1, p.pixelStride);
         p.bins             = std::max(8, p.bins);
         return p;
@@ -119,7 +160,20 @@ public:
             agent + "/map", rclcpp::QoS(1).reliable().transient_local());
         // /<agent>/odom is the base driver's wheel odometry; this is the SLAM pose.
         odom_pub_ = node_->create_publisher<nav_msgs::msg::Odometry>(agent + "/orb_slam3/odom", 10);
+        scan_pub_ = node_->create_publisher<sensor_msgs::msg::LaserScan>(
+            agent + "/orb_slam3/scan", rclcpp::SensorDataQoS());
         static_tf_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*node_);
+        if (p_.navFrames) tf_ = std::make_unique<tf2_ros::TransformBroadcaster>(*node_);
+        if (p_.navFrames && p_.poseSource == "wheels") {
+            // Wheel odometry of the base driver: odom -> base_footprint.
+            wheel_sub_ = node_->create_subscription<nav_msgs::msg::Odometry>(
+                agent + "/odom", 50,
+                [this](nav_msgs::msg::Odometry::ConstSharedPtr m) { onWheelOdom(*m); });
+            // map_nav -> odom, re-sent at 20 Hz with the current time so TF
+            // lookups never run past it while tracking is briefly lost.
+            corr_timer_ = node_->create_wall_timer(std::chrono::milliseconds(50),
+                                                   [this] { publishCorrection(); });
+        }
 
         if (p_.mountFromParams) {
             const float pi = (float)(p_.camPitchDeg * M_PI / 180.0);
@@ -148,22 +202,37 @@ public:
     {
         if (depthM.empty() || depthM.type() != CV_32F) return;
         if (!calibrated_) { tryCalibrate(depthM); return; }
+        const double t = stamp.seconds();
+
+        // The live scan needs only the floor calibration, not tracking.
+        std::unique_ptr<Scan> scan;
+        if (p_.scanRate > 0.0 && t - lastLiveT_ >= 1.0 / p_.scanRate) {
+            scan = buildScan(depthM);
+            if (scan) publishLiveScan(*scan, stamp);
+            lastLiveT_ = t;
+        }
+
         if (!trackingOk) return;
         ORB_SLAM3::KeyFrame* ref = slam_->GetTrackingReferenceKF();
         if (!ref) return;
 
         const Sophus::SE3f Twc = Tcw.inverse();
         ORB_SLAM3::Map* pMain = slam_->GetMainMap();
-        if (pMain && ref->GetMap() == pMain) publishOdom(Twc, stamp);
+        if (pMain && ref->GetMap() == pMain) {
+            publishOdom(Twc, stamp);
+            if (p_.navFrames) {
+                if (p_.poseSource == "slam") publishSlamBase(Twc, stamp);
+                else updateCorrection(Twc, t);
+            }
+        }
 
-        const double t = stamp.seconds();
         if (haveLast_) {
             if (t - lastT_ < p_.scanInterval) return;
             const float moved  = (Twc.translation() - lastTwc_.translation()).norm();
             const float turned = (lastTwc_.so3().inverse() * Twc.so3()).log().norm();
             if (moved < p_.scanMove && turned < p_.scanTurnDeg * M_PI / 180.0) return;
         }
-        auto scan = buildScan(depthM);
+        if (!scan) scan = buildScan(depthM);
         if (!scan) return;
         scan->anchor = ref;
         scan->Tcr    = Tcw * ref->GetPose().inverse();   // this camera relative to its keyframe
@@ -301,7 +370,11 @@ private:
         R.col(0) = x; R.col(1) = y; R.col(2) = z;     // base axes in camera coordinates
         Eigen::Quaternionf q(R);
         q.normalize();
-        T_cam_base_ = Sophus::SE3f(q, -h * z);
+        T_cam_sensor_ = Sophus::SE3f(q, -h * z);              // camera_floor
+        T_sensor_cam_ = T_cam_sensor_.inverse();
+        const Sophus::SE3f T_sensor_base(Eigen::Quaternionf::Identity(),
+            Eigen::Vector3f(-(float)p_.cameraForward, -(float)p_.cameraLeft, 0.f));
+        T_cam_base_ = T_cam_sensor_ * T_sensor_base;           // base_footprint (rear axle)
         T_base_cam_ = T_cam_base_.inverse();
 
         const float pitch = std::asin(std::clamp(-z.z(), -1.f, 1.f)) * 180.f / (float)M_PI;
@@ -329,7 +402,15 @@ private:
         const Sophus::SE3f T_map_nav = T_map_orb * T_cam_base_;
         std::vector<geometry_msgs::msg::TransformStamped> v;
         v.push_back(toTf(T_map_nav, p_.slamFrame, p_.globalFrame));
-        v.push_back(toTf(T_cam_base_, p_.cameraFrame, p_.baseFrame));
+        if (p_.navFrames && p_.poseSource == "slam")   // the SLAM pose is odom -> base_footprint
+            v.push_back(toTf(Sophus::SE3f(), p_.globalFrame, p_.odomFrame));
+        if (p_.navFrames) {          // camera hangs under the robot
+            v.push_back(toTf(T_base_cam_, p_.baseFrame, p_.cameraFrame));
+            v.push_back(toTf(T_base_cam_ * T_cam_sensor_, p_.baseFrame, p_.scanFrame));
+        } else {                     // robot hangs under the SLAM camera pose
+            v.push_back(toTf(T_cam_base_, p_.cameraFrame, p_.baseFrame));
+            v.push_back(toTf(T_cam_sensor_, p_.cameraFrame, p_.scanFrame));
+        }
         static_tf_->sendTransform(v);
     }
 
@@ -377,6 +458,127 @@ private:
         odomT_ = t; odomP_ = Tnb.translation(); odomYaw_ = yaw; haveOdom_ = true;
     }
 
+    // ── live scan and navigation frames ───────────────────────────────────
+    void publishLiveScan(const Scan& s, const rclcpp::Time& stamp)
+    {
+        const float fov  = (float)(p_.fovDeg * M_PI / 180.0);
+        const float binW = fov / p_.bins;
+        sensor_msgs::msg::LaserScan m;
+        m.header.stamp = stamp;
+        m.header.frame_id = p_.scanFrame;
+        m.angle_min = -0.5f * fov + 0.5f * binW;
+        m.angle_increment = binW;
+        m.angle_max = m.angle_min + binW * (p_.bins - 1);
+        m.range_min = 0.05f;
+        m.range_max = (float)p_.maxRange;
+        m.ranges.resize(p_.bins);
+        // An obstacle is a range; a direction seen free to the full range is
+        // +inf (costmaps clear it); anything else carries no information.
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        for (int b = 0; b < p_.bins; ++b) {
+            if (s.len[b] < 0.f) m.ranges[b] = nan;
+            else if (s.hit[b]) m.ranges[b] = s.len[b];
+            else m.ranges[b] = s.len[b] >= 0.9f * (float)p_.maxRange
+                             ? std::numeric_limits<float>::infinity() : nan;
+        }
+        scan_pub_->publish(m);
+    }
+
+    struct Pose2D { double t, x, y, yaw; };
+
+    void onWheelOdom(const nav_msgs::msg::Odometry& m)
+    {
+        const auto& q = m.pose.pose.orientation;
+        const double yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+        std::lock_guard<std::mutex> lk(nav_mx_);
+        wheel_.push_back({rclcpp::Time(m.header.stamp).seconds(), m.pose.pose.position.x,
+                          m.pose.pose.position.y, yaw});
+        while (wheel_.size() > 400) wheel_.pop_front();
+    }
+
+    // Wheel pose at time t (interpolated; the newest one if t is up to 0.2 s
+    // past it). False if there is no wheel odometry around t.
+    bool wheelAt(double t, Pose2D& out)
+    {
+        std::lock_guard<std::mutex> lk(nav_mx_);
+        if (wheel_.empty() || t < wheel_.front().t) return false;
+        if (t >= wheel_.back().t) {
+            if (t - wheel_.back().t > 0.2) return false;
+            out = wheel_.back();
+            return true;
+        }
+        for (size_t i = 1; i < wheel_.size(); ++i) {
+            if (wheel_[i].t < t) continue;
+            const Pose2D& a = wheel_[i - 1];
+            const Pose2D& b = wheel_[i];
+            const double f = (b.t > a.t) ? (t - a.t) / (b.t - a.t) : 0.0;
+            out = {t, a.x + f * (b.x - a.x), a.y + f * (b.y - a.y),
+                   a.yaw + f * std::remainder(b.yaw - a.yaw, 2.0 * M_PI)};
+            return true;
+        }
+        return false;
+    }
+
+    // map_nav -> odom = (SLAM pose of base_footprint) * (wheel pose)^-1, in
+    // the plane: Nav2 is 2D, and a level map_nav keeps odom level too.
+    void updateCorrection(const Sophus::SE3f& Twc, double t)
+    {
+        Pose2D w;
+        if (!wheelAt(t, w)) {
+            RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+                "[grid] no wheel odometry on %s/odom near the camera time: map_nav -> odom not "
+                "updated (is the base driver running?)", node_->get_name());
+            return;
+        }
+        const Sophus::SE3f Tnb = T_base_cam_ * Twc * T_cam_base_;
+        const Eigen::Matrix3f R = Tnb.rotationMatrix();
+        const double sx = Tnb.translation().x(), sy = Tnb.translation().y();
+        const double syaw = std::atan2(R(1, 0), R(0, 0));
+        const double cyaw = std::remainder(syaw - w.yaw, 2.0 * M_PI);
+        const double c = std::cos(cyaw), s = std::sin(cyaw);
+        std::lock_guard<std::mutex> lk(nav_mx_);
+        corr_ = {t, sx - (c * w.x - s * w.y), sy - (s * w.x + c * w.y), cyaw};
+        haveCorr_ = true;
+    }
+
+    // pose_source slam: odom (= map_nav) -> base_footprint is the SLAM pose of
+    // the rear axle, in the plane (Nav2 is 2D and keeps base_footprint on the
+    // floor), stamped with the camera frame's time.
+    void publishSlamBase(const Sophus::SE3f& Twc, const rclcpp::Time& stamp)
+    {
+        const Sophus::SE3f Tnb = T_base_cam_ * Twc * T_cam_base_;
+        const Eigen::Matrix3f R = Tnb.rotationMatrix();
+        const double yaw = std::atan2(R(1, 0), R(0, 0));
+        geometry_msgs::msg::TransformStamped m;
+        m.header.stamp = stamp;
+        m.header.frame_id = p_.odomFrame;
+        m.child_frame_id = p_.baseFrame;
+        m.transform.translation.x = Tnb.translation().x();
+        m.transform.translation.y = Tnb.translation().y();
+        m.transform.rotation.z = std::sin(0.5 * yaw);
+        m.transform.rotation.w = std::cos(0.5 * yaw);
+        tf_->sendTransform(m);
+    }
+
+    void publishCorrection()
+    {
+        Pose2D c;
+        {
+            std::lock_guard<std::mutex> lk(nav_mx_);
+            if (!haveCorr_) return;
+            c = corr_;
+        }
+        geometry_msgs::msg::TransformStamped m;
+        m.header.stamp = node_->now();
+        m.header.frame_id = p_.globalFrame;
+        m.child_frame_id = p_.odomFrame;
+        m.transform.translation.x = c.x;
+        m.transform.translation.y = c.y;
+        m.transform.rotation.z = std::sin(0.5 * c.yaw);
+        m.transform.rotation.w = std::cos(0.5 * c.yaw);
+        tf_->sendTransform(m);
+    }
+
     std::unique_ptr<Scan> buildScan(const cv::Mat& depth)
     {
         const int B = p_.bins;
@@ -385,8 +587,8 @@ private:
         const float maxR = (float)p_.maxRange;
         std::vector<std::vector<float>> band(B);
         std::vector<float> freeTo(B, -1.f);
-        const Eigen::Matrix3f Rbc = T_base_cam_.rotationMatrix();
-        const Eigen::Vector3f tbc = T_base_cam_.translation();
+        const Eigen::Matrix3f Rbc = T_sensor_cam_.rotationMatrix();   // scans live in camera_floor
+        const Eigen::Vector3f tbc = T_sensor_cam_.translation();
         const int st = p_.pixelStride;
         const float jumpRel = (float)p_.edgeJump;
 
@@ -484,7 +686,7 @@ private:
             }
             if (!k || k->isBad() || k->GetMap() != pMain) continue;   // not in the main map (yet)
             const Sophus::SE3f Tcw = s->Tcr * Trw * k->GetPose();
-            const Sophus::SE3f Tnb = T_base_cam_ * Tcw.inverse() * T_cam_base_;
+            const Sophus::SE3f Tnb = T_base_cam_ * Tcw.inverse() * T_cam_sensor_;   // camera_floor in map_nav
             const Eigen::Matrix3f R = Tnb.rotationMatrix();
             poses.push_back({Tnb.translation().x(), Tnb.translation().y(),
                              std::atan2(R(1, 0), R(0, 0)), s.get()});
@@ -573,10 +775,22 @@ private:
 
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr grid_pub_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr scan_pub_;
     std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_;
 
-    // Mount (written once by the tracking thread before calibrated_ is set).
-    Sophus::SE3f T_cam_base_, T_base_cam_;
+    // Navigation frames (nav_frames only).
+    std::unique_ptr<tf2_ros::TransformBroadcaster> tf_;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr wheel_sub_;
+    rclcpp::TimerBase::SharedPtr corr_timer_;
+    std::mutex nav_mx_;
+    std::deque<Pose2D> wheel_;
+    Pose2D corr_{0, 0, 0, 0};
+    bool haveCorr_ = false;
+    double lastLiveT_ = -1e9;
+
+    // Mount (written once by the tracking thread before calibrated_ is set):
+    // camera_floor (scans) and base_footprint (rear axle).
+    Sophus::SE3f T_cam_sensor_, T_sensor_cam_, T_cam_base_, T_base_cam_;
     std::atomic<bool> calibrated_{false};
     std::deque<Plane> fits_;
     std::string why_;

@@ -154,6 +154,12 @@ install(
   DESTINATION share/${PROJECT_NAME}
 )
 
+# Nav2 parameters and behaviour tree for the JetRacer (launch arg nav:=true)
+install(
+  DIRECTORY config
+  DESTINATION share/${PROJECT_NAME}
+)
+
 # ========== Packaging ==========
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

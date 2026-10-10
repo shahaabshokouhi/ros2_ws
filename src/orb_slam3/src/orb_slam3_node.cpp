@@ -170,8 +170,16 @@ public:
             // Occupancy grid for Nav2 from the depth images (occupancy_mapper.hpp).
             // Off by default: it adds the map_nav / base_link frames and a
             // per-frame depth pass that multi-agent runs do not need.
-            if (this->declare_parameter<bool>("occupancy_grid", false)) {
-                const auto gp = orbslam3_nav::GridParams::declare(this);
+            // nav_frames (needs occupancy_grid): REP-105 frames for Nav2 --
+            // map -> map_nav -> odom -> base_footprint -> camera, with the base
+            // driver's wheel odometry for odom -> base_footprint. The SLAM pose
+            // is then published as the map_nav -> odom correction instead of
+            // map -> camera (a TF frame has one parent). Everything else,
+            // multi-agent sharing included, is unchanged.
+            nav_frames_ = this->declare_parameter<bool>("nav_frames", false);
+            if (this->declare_parameter<bool>("occupancy_grid", false) || nav_frames_) {
+                auto gp = orbslam3_nav::GridParams::declare(this);
+                gp.navFrames = nav_frames_;
                 grid_ = std::make_unique<orbslam3_nav::OccupancyMapper>(
                     this, slam_.get(), fx_, fy_, cx_, cy_, gp, agent_name_);
                 RCLCPP_INFO(this->get_logger(),
@@ -500,7 +508,8 @@ private:
             tf_stamped.transform.rotation.y = q_map_cam.y();
             tf_stamped.transform.rotation.z = q_map_cam.z();
             tf_stamped.transform.rotation.w = q_map_cam.w();
-            tf_broadcaster_->sendTransform(tf_stamped);
+            if (!nav_frames_)   // in nav_frames the camera hangs under base_footprint
+                tf_broadcaster_->sendTransform(tf_stamped);
 
             // ---- Image plane point-cloud (commented out — user request) ----
             // Projects sampled image pixels to a fixed-depth plane in the camera
@@ -1602,6 +1611,7 @@ private:
 
     std::unique_ptr<ORB_SLAM3::System> slam_;
     std::unique_ptr<orbslam3_nav::OccupancyMapper> grid_;   // null unless occupancy_grid:=true
+    bool nav_frames_ = false;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr gray_pub_;   // null unless publish_gray:=true
     double gray_rate_hz_ = 5.0;
     int gray_width_ = 320;

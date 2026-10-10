@@ -1,5 +1,6 @@
 #!/bin/bash
-# RViz view of one robot: occupancy grid, pose, trajectory and (with
+# RViz view of one robot: occupancy grid, pose, trajectory, Nav2 plan and
+# costmaps (goals: the "2D Goal Pose" button), and (with
 # run_slam3.sh --teleop on the robot) its grayscale camera view.
 #
 #   ./run_rviz.sh [AGENT]        # default: $AGENT_NAME

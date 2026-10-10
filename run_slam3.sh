@@ -15,6 +15,10 @@
 #   ./run_slam3.sh --teleop        # single-robot test: drive it from another computer's
 #                                  # keyboard (there: ./run_teleop.sh <agent>); publishes a
 #                                  # small gray camera view and starts the base driver
+#   ./run_slam3.sh --nav           # single-robot navigation: grid + Nav2 for the car; give
+#                                  # goals with RViz "2D Goal Pose" (./run_rviz.sh <agent>).
+#                                  # The controller's position feedback is the SLAM pose.
+#   ./run_slam3.sh --nav-wheels    # same, but position from wheel odometry corrected by SLAM
 #
 # When saving is on, each keyframe's RGB + depth and the final optimized
 # keyframe poses are written to a slam_00N folder (default under ~/result) in
@@ -32,6 +36,8 @@ MONITOR_RATE=2.0
 USE_IMU="false"
 OCCUPANCY_GRID=false
 TELEOP=false
+NAV=false
+NAV_POSE=slam
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --save|--save-keyframes|save|yes|true)
@@ -70,10 +76,19 @@ while [[ $# -gt 0 ]]; do
             TELEOP=true
             shift
             ;;
+        --nav)
+            NAV=true
+            shift
+            ;;
+        --nav-wheels)
+            NAV=true
+            NAV_POSE=wheels
+            shift
+            ;;
         *)
             echo "Unknown argument: $1"
             echo "Usage: ./run_slam3.sh [--save] [--method hq-mpshare|new] [--imu|--imu-auto|--no-imu]"
-            echo "                      [--monitor] [--monitor-rate HZ] [--grid] [--teleop]"
+            echo "                      [--monitor] [--monitor-rate HZ] [--grid] [--teleop] [--nav|--nav-wheels]"
             exit 1
             ;;
     esac
@@ -98,6 +113,7 @@ echo "IMU mode: $USE_IMU"
 echo "Jetson monitor: $MONITOR (${MONITOR_RATE} Hz)"
 echo "Occupancy grid: $OCCUPANCY_GRID"
 echo "Teleop: $TELEOP"
+echo "Navigation: $NAV (robot pose from: $NAV_POSE)"
 
 colcon build --packages-select orb_slam3 --cmake-clean-cache
 source install/setup.bash
@@ -115,12 +131,23 @@ LAUNCH_ARGS=(
     monitor_rate_hz:="$MONITOR_RATE"
     occupancy_grid:="$OCCUPANCY_GRID"
     teleop:="$TELEOP"
+    nav:="$NAV"
+    nav_pose:="$NAV_POSE"
 )
 # The base driver owns the motor board's serial port: if run_joystick.sh or
 # run_controller.sh already started it, do not start a second one.
-if [ "$TELEOP" = "true" ]; then
+if [ "$TELEOP" = "true" ] || [ "$NAV" = "true" ]; then
     if pgrep -f "lib/jetracer/jetracer( |$)" >/dev/null; then
-        echo "Teleop: base driver already running; not starting another"
+        echo "Base driver already running; not starting another"
+        if [ "$NAV" = "true" ] && [ "$NAV_POSE" = "slam" ]; then
+            # run_joystick.sh's EKF (and a driver with publish_odom_transform)
+            # publishes odom -> base_footprint, which SLAM publishes here.
+            echo "Error: --nav takes the robot pose from SLAM, but run_joystick.sh /"
+            echo "run_controller.sh is running and publishes its own odom -> base_footprint."
+            echo "Stop it first (or use --nav-wheels to navigate on its wheel odometry)."
+            exit 1
+        fi
+        [ "$NAV" = "true" ] && echo "  (navigation needs odom -> base_footprint from it or its EKF)"
         LAUNCH_ARGS+=(teleop_driver:=false)
     fi
 fi
