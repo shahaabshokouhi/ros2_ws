@@ -93,10 +93,10 @@ for prim in ctx.get_stage().GetPrimAtPath(CAR + '/base_link/Realsense').GetAllCh
                 p.RemoveAPI(api)
                 print(f'[jetracer_sim] removed {api.__name__} from {p.GetPath()}', flush=True)
 
+import os  # noqa: E402
+import sys  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 if not args.plain_room:
-    import os  # noqa: E402
-    import sys  # noqa: E402
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import room_dressing  # noqa: E402
     for line in room_dressing.dress(ctx.get_stage(), args.light):
         print(f'[jetracer_sim] room: {line}', flush=True)
@@ -107,6 +107,15 @@ elif (1000.0 if args.light is None else args.light) > 0:
     dome = UsdLux.DomeLight.Define(ctx.get_stage(), '/World/jetracer_sim_dome_light')
     dome.CreateIntensityAttr(1000.0 if args.light is None else args.light)
     print(f'[jetracer_sim] added a dome light ({dome.GetIntensityAttr().Get():g})', flush=True)
+
+# Viewing cameras for the window (top + 4 upper corners); the scene's own
+# default view looks at the room from outside, i.e. at the ceiling.
+import views  # noqa: E402
+view_paths = views.add_views(ctx.get_stage())
+if not args.headless:
+    from omni.kit.viewport.utility import get_active_viewport  # noqa: E402
+    get_active_viewport().camera_path = view_paths[3]   # Corner_SW: behind the car's start
+print('[jetracer_sim] views (viewport camera menu): ' + ', '.join(p.split('/')[-1] for p in view_paths), flush=True)
 
 # Drive: the scene's Ackermann graph, on the robot's topic.
 drive = CAR + '/ROS_Ackermann_Drive'

@@ -185,6 +185,13 @@ Runs `src/jetracer_sim/isaac/run_isaac.py` with Isaac Sim's own Python
 by default; the simulation starts playing once the terminal prints
 `[jetracer_sim] running …`. See [§9](#9-how-the-isaac-sim-stand-in-works).
 
+The window opens on a camera in the room's upper south-west corner, behind
+the car's start. Five fixed views are in the viewport's camera menu (camera
+icon, top left of the viewport), under `/World/SimViews`: `Top` (a flat plan
+of the whole room, x to the right and y up, like RViz) and `Corner_NE`,
+`Corner_NW`, `Corner_SW`, `Corner_SE` (upper corners looking at the room
+centre; N = +y, E = +x). `Perspective` is the free camera again.
+
 | Option | Default | Effect |
 |---|---|---|
 | `--headless` | off | no window |
@@ -466,6 +473,7 @@ Config: `src/orb_slam3/config/nav2_jetracer.yaml`,
     cached in `~/.cache/jetracer_sim/textures_v1` (delete it after editing a
     texture). Nothing is written to the `.usd`;
   * with `--plain-room`, adds the dome light instead;
+  * adds the five viewing cameras (`views.py`) and shows `Corner_SW`;
   * points the scene's drive and odometry graphs at the robot's topic names
     (odometry becomes **ground truth**, off `/tf`);
   * adds the camera graph (RGB + depth from the same camera, 30 Hz, system
@@ -494,7 +502,7 @@ Config: `src/orb_slam3/config/nav2_jetracer.yaml`,
 | `src/orb_slam3/` | The ROS 2 node around the ORB-SLAM3 library (`src/orb_slam3_node.cpp`). Camera input, pose and map output, robot-to-robot messaging, keyframe dataset saving, evaluation logs. `src/occupancy_mapper.hpp`: grid, scans, navigation frames, safety gate. `launch/orb_slam3.launch.py`, `config/` (Nav2). |
 | `src/orbslam2_msgs/` | Messages shared by all robots (map points, keyframe adverts and data, ownership updates…). |
 | `src/jetracer/` | The car: motor/IMU driver `src/jetracer.cpp` (`/<agent>/cmd_vel` in, `odom`/`imu` out, stops after 1 s without commands); `scripts/teleop_keyboard.py` (`teleop`), `teleop_joy.py`, `pid_controller.py` (Vicon waypoints), `display_node.py` (OLED), `odom_ekf.py`; `jetracer/jetson_monitor.py`; `config/waypoints.yaml`. |
-| `src/jetracer_sim/` | Isaac Sim stand-in: `isaac/run_isaac.py`, `isaac/room_dressing.py`, `jetracer_sim/cmd_vel_to_ackermann.py`, `launch/sim.launch.py`, `config/`. |
+| `src/jetracer_sim/` | Isaac Sim stand-in: `isaac/run_isaac.py`, `isaac/room_dressing.py`, `isaac/views.py`, `jetracer_sim/cmd_vel_to_ackermann.py`, `launch/sim.launch.py`, `config/`. |
 | `src/orb_slam2/` | Legacy ORB-SLAM2 node. |
 | `robot_view.rviz` | RViz layout used by `run_rviz.sh` (`__AGENT__` is replaced). |
 
