@@ -157,9 +157,12 @@ Click on terminal 3 first so it gets the keys. Hold a key to keep moving; the ca
 
 <div class="note">If you're doing several runs in a row, check that nothing is left over before restarting:
 <pre>pgrep -fa "orb_slam3_node|planner_server"</pre>
-It should print nothing. Leftover processes fight over the same topics. If Nav2 ever prints
-<code>GridBased: failed to create plan, exceeded maximum iterations</code> on an empty map, stop everything, check
-with this command, and start again.</div>
+It should print nothing. Leftover processes fight over the same topics.</div>
+
+<div class="note"><b>If a goal fails with</b> <code>GridBased: failed to create plan, exceeded maximum iterations</code>,
+the planner sees no way to the goal: it is inside an obstacle, or obstacles on the map close it off. Look at the
+pink cells in RViz around the car and the goal. (A ring of fake obstacles around the car caused this until
+2026-10-10; it is fixed in <code>nav2_jetracer.yaml</code>.)</div>
 
 <h2>6. Options</h2>
 <table>

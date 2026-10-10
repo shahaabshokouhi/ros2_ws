@@ -229,7 +229,8 @@
         inf_is_valid: True                  # +inf = seen free to full range
         min_obstacle_height: -1.0           # the scan lies in the floor plane (z = 0)
         max_obstacle_height: 2.0
-        obstacle_max_range: 1.0
+        obstacle_max_range: 0.95            # below 1 m: Nav2 turns +inf into a point at range_max - 0.1 mm,
+                                            # which would be marked as an obstacle 1 m away in every free direction
         obstacle_min_range: 0.0
         raytrace_max_range: 1.0
         raytrace_min_range: 0.0
@@ -272,7 +273,8 @@
         inf_is_valid: True                  # +inf = seen free to full range
         min_obstacle_height: -1.0           # the scan lies in the floor plane (z = 0)
         max_obstacle_height: 2.0
-        obstacle_max_range: 1.0
+        obstacle_max_range: 0.95            # below 1 m: Nav2 turns +inf into a point at range_max - 0.1 mm,
+                                            # which would be marked as an obstacle 1 m away in every free direction
         obstacle_min_range: 0.0
         raytrace_max_range: 1.0
         raytrace_min_range: 0.0
