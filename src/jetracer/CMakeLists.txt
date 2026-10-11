@@ -45,6 +45,13 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# Steering calibration (how the car really turns): ros2 run jetracer steer_calibration
+install(PROGRAMS
+  scripts/steer_calibration.py
+  RENAME steer_calibration
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 # Keyboard teleop from a remote computer: ros2 run jetracer teleop
 install(PROGRAMS
   scripts/teleop_keyboard.py
