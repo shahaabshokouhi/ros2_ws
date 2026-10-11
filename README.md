@@ -95,7 +95,7 @@ machine.
 
 | For | Install |
 |---|---|
-| Navigation (`--nav`) | `sudo apt install ros-humble-navigation2 ros-humble-nav2-bringup` |
+| Navigation (`--nav`) | `sudo apt install ros-humble-navigation2 ros-humble-nav2-bringup ros-humble-diagnostic-updater` (on a robot the last one was missing and Nav2's lifecycle manager could not start) |
 | Simulation (`jetracer_sim`) | `sudo apt install ros-humble-ackermann-msgs`; Isaac Sim with Isaac Lab, activated by `~/activate_isaaclab_ros2.sh` |
 | Gamepad (`run_joystick.sh`) | `ros-humble-joy`, `ros-humble-robot-localization` |
 
@@ -156,7 +156,8 @@ exist.
 
 Opens RViz (`run_rviz.sh`) in the background and turns the terminal into a
 keyboard controller (`ros2 run jetracer teleop`), publishing
-`/<AGENT>/cmd_vel` at 20 Hz. The robot needs `run_slam3.sh --teleop` (or
+`/<AGENT>/cmd_vel` at 20 Hz while you drive (nothing while no key is held, so
+an open keyboard terminal does not fight Nav2). The robot needs `run_slam3.sh --teleop` (or
 `--nav`). Single robot only.
 
 | Key | Action |
@@ -175,8 +176,8 @@ and the motor driver stops the car on its own after 1 s without commands
 `turn` (0.8 rad/s), `max_linear` (0.3), `max_angular` (1.5), `hold_timeout`
 (0.7 s), `latch` (false; true = a key keeps its command until `space`).
 Teleop goes straight to the motors: it is **not** stopped by Nav2's safety
-gate, so it can always rescue a robot. Keep your hands off the keys while
-Nav2 drives.
+gate, so it can always rescue a robot, also after a tracking loss. Keep your
+hands off the keys while Nav2 drives.
 
 ### `run_isaac_sim.sh [options]` — the simulated robot (PC, terminal 1)
 
@@ -428,14 +429,22 @@ Config: `src/orb_slam3/config/nav2_jetracer.yaml`,
   the beginning, so a goal anywhere in it is planned at once, straight through
   what hasn't been seen. The live scan and the grid mark obstacles. The path
   is checked 3 times a second, and a blocked path is replanned.
+* **The live scan in the costmaps** marks obstacles up to 0.95 m and clears
+  free space up to 1 m. The scan reports "free to 1 m" as +inf, which Nav2
+  turns into a point just inside 1 m; marking up to the full 1 m made every
+  free direction an obstacle, and after a turn the car sat in a closed ring
+  of them (fixed 2026-10-10).
 * **Recoveries:** back up 25 cm, then wait. They never clear the costmaps:
   with a 1 m sensor that made the car forget an obstacle it could no longer
   see up close. There's no spin.
 * **Safety gate:** Nav2's commands go through the SLAM node
   (`cmd_vel_gate_in → cmd_vel`). It sends zero while the SLAM pose is more
   than 0.3 s old (tracking lost), because TF would otherwise keep handing out
-  the last pose and Nav2 would drive blind. Keyboard teleop is not gated. If
-  the car stops this way, back it away with teleop until SLAM relocalizes.
+  the last pose and Nav2 would drive blind. On a tracking loss it sends a few
+  stops, **cancels the goal** and then stays silent, so the keyboard (not
+  gated) can drive the car back until SLAM relocalizes; then give the goal
+  again. Be quick: without the IMU, ORB-SLAM3 tries to relocalize in the
+  current map for 3 s, then starts a new map that must merge back first.
 * **Giving goals:** RViz **2D Goal Pose** (frame `map_nav`), or the
   `/<agent>/navigate_to_pose` action.
 
@@ -519,7 +528,10 @@ not tracked.
 | `Frames didn't arrive within 5 seconds` | `./reset_camera.sh`, wait 4 s, restart. |
 | `frame [map_nav] does not exist` in RViz | Floor not calibrated yet: the camera must see the floor 1–30 cm below it. The node logs why every 5 s (`[grid] still calibrating the floor: …`). On the desk the camera is too high; put it on the floor. |
 | Nav2 prints `Timed out waiting for transform … odom` | Normal for the first seconds (floor calibration). If it persists, check the line above. |
-| Car stops during navigation, log says `[nav] no SLAM pose …` | Tracking lost: the safety gate holds the car. Back it away with teleop until SLAM relocalizes. |
+| Car stops during navigation, log says `[nav] no SLAM pose …` | Tracking lost: the safety gate stopped the car and cancelled the goal. Back it away with teleop until SLAM relocalizes, then give the goal again. |
+| A goal does nothing: no blue path, no movement | Nav2 isn't active: `Managed nodes are active` never appeared. Look near the top of the log: `lifecycle_manager: error while loading shared libraries: libdiagnostic_updater.so` → `sudo apt install ros-humble-diagnostic-updater`; `package 'nav2_…' not found` → install Nav2 ([§2](#2-one-time-setup)); endless `Timed out waiting for transform … odom` → floor not calibrated. |
+| `GridBased: failed to create plan, exceeded maximum iterations` | The planner sees no way to the goal: the goal is inside an obstacle, or obstacles close it off. Look at the pink cells in RViz around the car and the goal. (A ring of fake obstacles around the car caused this until 2026-10-10: pull.) |
+| `Failed to make progress`, and the car keeps backing up a little | Something else is publishing on `/<agent>/cmd_vel` and cancelling Nav2's commands. Until 2026-10-10 the keyboard teleop sent "stop" 20 times a second even when idle: pull and rebuild `jetracer` on the PC. Also check that `run_joystick.sh` / `run_controller.sh` aren't running. |
 | `run_slam3.sh --nav` refuses to start | `run_joystick.sh` / `run_controller.sh` is running and publishes its own robot pose. Stop it, or use `--nav-wheels`. |
 | Simulation: black camera image or tracking lost after ~1 m | Use the defaults of `run_isaac_sim.sh` (clipping fix, furnished room and lights are applied automatically). |
 | Simulation: Isaac exits at start, or the camera topic has 2 publishers / stray `/drive`, `/odom`, `/tf` | The `.usd` was saved after a run (possibly with the scene added twice). Restore the original file; see the note in [§9](#9-how-the-isaac-sim-stand-in-works). |

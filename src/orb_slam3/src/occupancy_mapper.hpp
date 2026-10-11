@@ -46,8 +46,11 @@
 //               while the SLAM pose is fresh (pose_source slam). TF hands out
 //               the last pose however old it is, so after a tracking loss
 //               Nav2 would keep steering on a frozen position (seen in
-//               simulation: the car drove on to 11 cm from a wall). Keyboard
-//               teleop publishes on /<agent>/cmd_vel directly and is not gated.
+//               simulation: the car drove on to 11 cm from a wall). On a
+//               tracking loss the gate sends a few stops, cancels the Nav2
+//               goal and then stays silent: a stream of stops would cancel
+//               out the keyboard teleop, which publishes on /<agent>/cmd_vel
+//               directly (not gated) and is how the car is driven back.
 // /<agent>/orb_slam3/odom (nav_msgs/Odometry) is the SLAM pose of
 // base_footprint; /<agent>/orb_slam3/scan (sensor_msgs/LaserScan) the live
 // obstacle scan for Nav2's local costmap. /<agent>/odom is the wheel odometry.
@@ -57,6 +60,7 @@
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <geometry_msgs/msg/twist.hpp>
+#include <action_msgs/srv/cancel_goal.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <geometry_msgs/msg/transform_stamped.hpp>
@@ -185,6 +189,9 @@ public:
             cmd_in_ = node_->create_subscription<geometry_msgs::msg::Twist>(
                 agent + "/cmd_vel_gate_in", 10,
                 [this](geometry_msgs::msg::Twist::ConstSharedPtr m) { gateCommand(*m); });
+            for (const char* action : {"navigate_to_pose", "navigate_through_poses"})
+                cancel_.push_back(node_->create_client<action_msgs::srv::CancelGoal>(
+                    agent + "/" + action + "/_action/cancel_goal"));
         }
         if (p_.navFrames && p_.poseSource == "wheels") {
             // Wheel odometry of the base driver: odom -> base_footprint.
@@ -592,19 +599,42 @@ private:
         tf_->sendTransform(m);
     }
 
-    // Pass Nav2's command on only while the SLAM pose is fresh; otherwise stop.
+    // Pass Nav2's command on only while the SLAM pose is fresh. Otherwise stop
+    // the car with a few zero commands, cancel the goal, and stay silent so
+    // the keyboard can drive the car back (the base driver stops on its own
+    // after 1 s without commands).
     void gateCommand(const geometry_msgs::msg::Twist& m)
     {
         const double age = havePose_.load()
             ? std::chrono::duration<double>(std::chrono::steady_clock::now() - lastPoseWall_.load()).count()
             : 1e9;
         if (p_.poseSource == "slam" && age > 0.3) {
-            RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 2000,
-                "[nav] no SLAM pose for %.1f s (tracking lost, or not in the main map): "
-                "holding the car still; keyboard teleop still works", age > 1e8 ? -1.0 : age);
-            cmd_out_->publish(geometry_msgs::msg::Twist());
+            const auto now = std::chrono::steady_clock::now();
+            const bool moving = m.linear.x != 0.0 || m.angular.z != 0.0;
+            if (!gateHolding_ || (moving && now - lastCancel_ > std::chrono::seconds(2))) {
+                if (!gateHolding_) {
+                    RCLCPP_WARN(node_->get_logger(),
+                        "[nav] no SLAM pose for %.1f s (tracking lost, or not in the main map): "
+                        "holding the car still and cancelling the Nav2 goal; drive back with the "
+                        "keyboard until tracking returns, then give the goal again",
+                        age > 1e8 ? -1.0 : age);
+                    gateStops_ = 5;
+                }
+                gateHolding_ = true;
+                lastCancel_ = now;
+                for (auto& c : cancel_)   // an empty request cancels all goals
+                    if (c->service_is_ready())
+                        c->async_send_request(std::make_shared<action_msgs::srv::CancelGoal::Request>());
+            }
+            if (gateStops_ > 0) {
+                --gateStops_;
+                cmd_out_->publish(geometry_msgs::msg::Twist());
+            }
             return;
         }
+        if (gateHolding_)
+            RCLCPP_INFO(node_->get_logger(), "[nav] SLAM pose is back: passing Nav2 commands again");
+        gateHolding_ = false;
         cmd_out_->publish(m);
     }
 
@@ -850,6 +880,10 @@ private:
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_out_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_in_;
+    std::vector<rclcpp::Client<action_msgs::srv::CancelGoal>::SharedPtr> cancel_;
+    bool gateHolding_ = false;   // gate state; touched only in gateCommand (executor thread)
+    int gateStops_ = 0;
+    std::chrono::steady_clock::time_point lastCancel_{};
     std::atomic<std::chrono::steady_clock::time_point> lastPoseWall_{std::chrono::steady_clock::time_point{}};
     std::atomic<bool> havePose_{false};
     std::atomic<ORB_SLAM3::Map*> firstMap_{nullptr};

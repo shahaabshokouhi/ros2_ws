@@ -16,6 +16,7 @@ find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(action_msgs REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(tf2 REQUIRED)
@@ -121,6 +122,7 @@ ament_target_dependencies(
   sensor_msgs
   geometry_msgs
   nav_msgs
+  action_msgs
   tf2
   tf2_ros
   cv_bridge

@@ -134,8 +134,9 @@ Click on terminal 3 first so it gets the keys. Hold a key to keep moving; the ca
   the last key held).</p>
   <p>Letter keys need an English keyboard layout; arrows work in any layout.</p>
   <p><b>Recovering:</b> driving by hand is how you get out if the car is stuck or tracking is lost. In that case
-  terminal 2 prints <code>[nav] no SLAM pose … holding the car still</code>. Back away from the wall until the camera
-  view in RViz says <code>TRACKING</code> again.</p>
+  terminal 2 prints <code>[nav] no SLAM pose … holding the car still and cancelling the Nav2 goal</code>.
+  Back away straight away (SLAM gives up on the current map after 3 s) until the camera
+  view in RViz says <code>TRACKING</code> again, then give the goal again.</p>
 </div>
 </div>
 </div>
