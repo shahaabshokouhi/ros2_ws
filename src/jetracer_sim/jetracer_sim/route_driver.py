@@ -13,6 +13,11 @@ Writes, per agent, <out>/<agent>_online.csv: the SLAM node's live pose
 estimate (/<agent>/orb_slam3/odom, rear axle in map_nav) with the wall time it
 arrived, for comparing the online estimate with ground truth afterwards.
 Exits when every car has finished (or after `timeout` s).
+
+With drive:=false it only records (run_ma_sim_nav.sh: the cars are driven by
+their own Nav2 to goals given in RViz): the live estimates as above, and every
+goal sent to a robot (<out>/<agent>_goals.csv, in that robot's map frame), until
+it is stopped with Ctrl-C.
 """
 import math
 import os
@@ -20,6 +25,7 @@ import time
 
 import rclpy
 from geometry_msgs.msg import Twist
+from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 
@@ -92,23 +98,39 @@ class RouteDriver(Node):
         spec_path = self.declare_parameter('spec', '').value
         self.out = os.path.expanduser(self.declare_parameter('out', '.').value)
         self.timeout = float(self.declare_parameter('timeout', 900.0).value)
+        self.drive = bool(self.declare_parameter('drive', True).value)
         spec = routes.load_spec(spec_path)
         self.speed = float(spec['speed'])
-        pts = routes.route_points(spec['route'])
-        s_list, total = routes.cumulative(pts)
+        if self.drive:
+            pts = routes.route_points(spec['route'])
+            s_list, total = routes.cumulative(pts)
+        else:
+            pts, s_list, total = [], [], 0.0
         os.makedirs(self.out, exist_ok=True)
         self.cars, self.pubs, self.logs = [], {}, {}
         for name, start in zip(spec['agents'], routes.start_poses(spec)):
             car = Car(name, start, pts, s_list, total)
             car.laps = float(spec['laps'])
             self.cars.append(car)
-            self.pubs[name] = self.create_publisher(Twist, f'/{name}/cmd_vel', 10)
-            self.create_subscription(Odometry, f'/{name}/ground_truth/odom', car.on_gt, 50)
+            if self.drive:
+                self.pubs[name] = self.create_publisher(Twist, f'/{name}/cmd_vel', 10)
+                self.create_subscription(Odometry, f'/{name}/ground_truth/odom', car.on_gt, 50)
+            else:
+                g = open(os.path.join(self.out, f'{name}_goals.csv'), 'w')
+                g.write('wall,frame,x,y,yaw\n')
+                self.logs[name + '/goals'] = g
+                self.create_subscription(PoseStamped, f'/{name}/goal_pose',
+                                         lambda m, n=name: self.on_goal(n, m), 10)
             log = open(os.path.join(self.out, f'{name}_online.csv'), 'w')
             log.write('wall,stamp,x,y,yaw\n')
             self.logs[name] = log
             self.create_subscription(Odometry, f'/{name}/orb_slam3/odom',
                                      lambda m, n=name: self.on_est(n, m), 50)
+        if not self.drive:
+            self.get_logger().info(f'recording {len(self.cars)} robots (not driving); Ctrl-C to stop')
+            self.t0 = time.monotonic()
+            self.finished = False
+            return
         self.get_logger().info(
             f'{len(self.cars)} cars, route {total:.1f} m, {spec["laps"]} laps at {self.speed} m/s '
             f'(about {spec["laps"] * total / self.speed:.0f} s)')
@@ -122,6 +144,12 @@ class RouteDriver(Node):
         self.logs[name].write(f'{time.time():.4f},{st:.4f},{p.position.x:.5f},{p.position.y:.5f},'
                               f'{yaw_of(p.orientation):.5f}\n')
 
+    def on_goal(self, name, m):
+        p = m.pose
+        self.logs[name + '/goals'].write(f'{time.time():.4f},{m.header.frame_id},{p.position.x:.4f},'
+                                         f'{p.position.y:.4f},{yaw_of(p.orientation):.4f}\n')
+        self.logs[name + '/goals'].flush()
+
     def tick(self):
         for car in self.cars:
             self.pubs[car.name].publish(car.command(self.speed))
@@ -129,7 +157,7 @@ class RouteDriver(Node):
             self.finished = True
 
     def stop(self):
-        for _ in range(10):
+        for _ in range(10 if self.drive else 0):
             for name in self.pubs:
                 self.pubs[name].publish(Twist())
             time.sleep(0.02)
@@ -146,7 +174,7 @@ def main():
     except KeyboardInterrupt:
         pass
     node.stop()
-    for c in node.cars:
+    for c in (node.cars if node.drive else []):
         node.get_logger().info(f'{c.name}: drove {c.travel:.1f} m along the route'
                                f'{"" if c.done else " (NOT finished)"}')
     rclpy.shutdown()

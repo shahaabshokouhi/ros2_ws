@@ -42,6 +42,7 @@ def launch_setup(context):
                 'nav_pose': flag('nav_pose'),
                 'teleop': flag('teleop'),
                 'extra_params': os.path.join(share, 'config', 'sim_params.yaml'),
+                'frame_prefix': flag('frame_prefix'),
             }.items()),
         Node(package='jetracer_sim', executable='cmd_vel_to_ackermann', name='cmd_vel_to_ackermann',
              output='screen', parameters=[{'agent_name': agent}]),
@@ -52,6 +53,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('agent', default_value='sim'),
         DeclareLaunchArgument('ma_method', default_value='new'),
+        DeclareLaunchArgument('frame_prefix', default_value='',
+                              description='TF frame prefix (several robots on one /tf), e.g. sim_1'),
         DeclareLaunchArgument('grid', default_value='true'),
         DeclareLaunchArgument('nav', default_value='false'),
         DeclareLaunchArgument('nav_pose', default_value='slam'),

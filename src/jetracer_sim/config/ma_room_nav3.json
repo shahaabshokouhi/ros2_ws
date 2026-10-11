@@ -1,0 +1,6 @@
+{
+  "name": "room_nav3",
+  "description": "Three cars in the furnished 6 x 6 m room, each with its own SLAM and Nav2; goals are given by hand in each robot's RViz window.",
+  "agents": ["sim_1", "sim_2", "sim_3"],
+  "starts": [[0.10, -1.60, 0.0], [1.90, 1.25, 90.0], [-1.70, 1.25, -90.0]]
+}

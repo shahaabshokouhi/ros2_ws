@@ -28,8 +28,9 @@ drops the other robots' messages.
 7. [How the occupancy grid works](#7-how-the-occupancy-grid-works)
 8. [How navigation works](#8-how-navigation-works)
 9. [How the Isaac Sim stand-in works](#9-how-the-isaac-sim-stand-in-works)
-10. [Packages and files](#10-packages-and-files)
-11. [Troubleshooting](#11-troubleshooting)
+10. [Multi-robot simulation, step by step](#10-multi-robot-simulation-step-by-step)
+11. [Packages and files](#11-packages-and-files)
+12. [Troubleshooting](#12-troubleshooting)
 
 ---
 
@@ -52,7 +53,8 @@ need first.
 | Drive with a gamepad (no SLAM) | `./run_joystick.sh` | |
 | Follow Vicon waypoints | `./run_controller.sh` | |
 | Fix a wedged RealSense ("Frames didn't arrive") | `./reset_camera.sh` | |
-| Test several robots in simulation and score them against ground truth | — | `./run_ma_sim_test.sh` (report in `~/result/ma_sim/…`, see [below](#run_ma_sim_testsh--multi-robot-test-in-simulation-with-a-report-pc)) |
+| Drive several simulated robots with Nav2, giving each its goals by hand | — | `./run_ma_sim_nav.sh` (Isaac window + one RViz per robot; report in `~/result/ma_nav/…`, step by step in [§10](#10-multi-robot-simulation-step-by-step)) |
+| Test several robots in simulation and score them against ground truth | — | `./run_ma_sim_test.sh` (report in `~/result/ma_sim/…`, step by step in [§10](#10-multi-robot-simulation-step-by-step)) |
 | Test the whole stack in Isaac Sim | — | terminal 1 `./run_isaac_sim.sh`; terminal 2 `./run_sim_slam.sh --nav --teleop`; then `ROS_DOMAIN_ID=31 ./run_rviz.sh sim` and/or `ROS_DOMAIN_ID=31 ./run_teleop.sh sim` |
 | Evaluate the sharing method offline on recorded data | — | `~/ORB_SLAM3/eval/kf_sharing/run_replay.sh` ([its README](https://github.com/shahaabshokouhi/ORB_SLAM3/blob/master/eval/kf_sharing/README.md)) |
 
@@ -140,7 +142,11 @@ Notes:
 * Any `MA_NEW_*` environment variable is passed to the SLAM node, for example
   `MA_NEW_VERBOSE=1 ./run_slam3.sh --method new` (list in the ORB_SLAM3 README).
 
-### `run_rviz.sh [AGENT]` — watch one robot (PC)
+### `run_rviz.sh [AGENT [FRAME_PREFIX]]` — watch one robot (PC)
+
+With a `FRAME_PREFIX` (several robots on one `/tf`, as in `run_ma_sim_nav.sh`) the
+view uses that robot's frames (`<prefix>/map_nav`, …); the window is titled
+`rviz_<agent>.rviz`.
 
 Opens RViz with `robot_view.rviz`, filled in for the given agent (default
 `$AGENT_NAME`). Fixed frame `map_nav`. It shows the occupancy grid, the
@@ -281,6 +287,32 @@ plotting libraries). A new test is a new spec file: robot names
 routes 0.3 m clear of `config/room_obstacles.json` (the furniture and props).
 Three robots use about 60 % of this PC's CPU and 80 % of its GPU.
 
+### `run_ma_sim_nav.sh` — several robots with Nav2, goals by hand (PC)
+
+```bash
+./run_ma_sim_nav.sh [--spec FILE] [--method new|hq-mpshare] [--name NAME] [--headless] [--no-rviz] [--no-report]
+```
+
+Loads the furnished room with several JetRacers (default
+`config/ma_room_nav3.json`: `sim_1`, `sim_2`, `sim_3` at three places in the
+room), gives each its own SLAM and **Nav2**, and opens one RViz window per
+robot (title `rviz_sim_k.rviz`). You design the paths: in a robot's window
+click **2D Goal Pose**, then click and drag; each robot plans and drives on
+its own while the robots share maps (method `new` by default). Each robot's
+map starts at its own start pose, facing +x.
+
+Each robot has its own TF frames (`sim_1/map_nav`, `sim_1/odom`,
+`sim_1/base_footprint`, …; launch argument `frame_prefix`), so the robots'
+Nav2 stacks cannot see each other's poses.
+
+Press **Enter** (or Ctrl-C) in the terminal to end the session: goals are
+cancelled, each robot saves its map, and the same report as
+`run_ma_sim_test.sh` is written to a new folder
+`~/result/ma_nav/<date>_<time>_<name>_<method>/` (paths vs ground truth, map
+merging, maps; plus the goals you gave, `raw/online/<robot>_goals.csv`).
+Isaac with a window, three SLAM + Nav2 stacks and three RViz windows use most
+of this PC; `--headless` saves some GPU.
+
 ### Other scripts
 
 | Script | What it does |
@@ -306,6 +338,7 @@ What `run_slam3.sh` (and, without camera and driver, `run_sim_slam.sh`) runs.
 | `agent` | `agent_0` | robot name; node name and topic prefix |
 | `vocab_file`, `settings_file` | — | ORB vocabulary, ORB-SLAM3 camera settings |
 | `ma_method` | `new` | multi-robot method: `new` or `hq-mpshare` |
+| `frame_prefix` | empty | prefix for every TF frame of the robot (`sim_1` → `sim_1/map`, `sim_1/map_nav`, …; Nav2's frames too); for several robots on one `/tf` (multi-robot simulation). Empty on the robots |
 | `use_imu` | `false` | `false` / `true` / `auto` |
 | `save_keyframes`, `result_dir` | `false`, `` | `--save` |
 | `tracking_cpu`, `tracking_rtprio` | `-1`, `0` | pin / prioritise the tracking thread |
@@ -328,7 +361,7 @@ move TF into the namespace, where nothing publishes it.
 ### `jetracer_sim/launch/sim.launch.py`
 
 Arguments `agent` (`sim`), `ma_method` (`new`), `grid` (`true`), `nav`
-(`false`), `nav_pose` (`slam`), `teleop` (`false`). Includes
+(`false`), `nav_pose` (`slam`), `teleop` (`false`), `frame_prefix` (empty). Includes
 `orb_slam3.launch.py` with `camera:=false teleop_driver:=false monitor:=false`,
 the simulated camera's settings (`jetracer_sim/config/isaac_d455.yaml`) and
 the sim car's camera position (`config/sim_params.yaml`), plus the
@@ -354,6 +387,7 @@ JetRacer.
 | Parameter | Default | Meaning |
 |---|---|---|
 | `ma_method` | `new` | multi-robot method |
+| `frame_prefix` | empty | prefix for all TF frames this node and its grid publish (several robots on one `/tf`) |
 | `use_imu` | `false` | `false` / `true` / `auto` |
 | `save_keyframes`, `result_dir`, `output_dir` | `false`, `` , `.` | keyframe dataset; where shutdown exports go |
 | `tracking_cpu`, `tracking_rtprio` | `-1`, `0` | tracking thread pinning / priority |
@@ -568,7 +602,142 @@ Config: `src/orb_slam3/config/nav2_jetracer.yaml`,
 
 ---
 
-## 10. Packages and files
+## 10. Multi-robot simulation, step by step
+
+Two ways to run several robots in the simulated room, both on this PC. Both
+write a report (paths against ground truth, map merging, each robot's map) to
+a **new folder every time**, so earlier results are never overwritten.
+
+| | Route test (`run_ma_sim_test.sh`) | Nav session (`run_ma_sim_nav.sh`) |
+|---|---|---|
+| Use it to | compare methods: the same drive every run | try things out: you choose where each robot goes |
+| Who drives | a script, on the true pose, along one loop | each robot's own Nav2, to goals you click in RViz |
+| Windows | none (`--gui` to watch Isaac) | Isaac + one RViz per robot |
+| Length | about 6 minutes, ends by itself | until you press Enter |
+| Results | `~/result/ma_sim/<date>_<time>_<name>_<method>/` | `~/result/ma_nav/<date>_<time>_<name>_<method>/` |
+
+Before either: close any simulation you started yourself (`run_isaac_sim.sh`,
+`run_sim_slam.sh`); the scripts also stop leftovers from this workspace. When
+an Isaac window asks "Save changes?", always answer **Don't save**.
+
+### A. Compare methods with the route test
+
+1. Open a terminal in the workspace and start the test with the default
+   method (`new`):
+   ```bash
+   cd ~/workspaces/ros2_ws
+   ./run_ma_sim_test.sh
+   ```
+2. Watch the progress lines. The whole test takes about 6 minutes and needs no
+   input:
+   ```
+   starting Isaac Sim ...                 (about 1 minute)
+   starting 3 SLAM stacks ...
+   floor calibrated on 3 of 3 robots
+   driving the route ...                  (about 2 minutes: 1.5 laps)
+     sim_1: drove 19.8 m along the route  (one line per robot)
+   letting sharing settle for 20 s ...
+   stopping SLAM (final optimisation and export) ...
+     sim_1: wrote 184 keyframes, wrote 18491 map points
+   scoring and writing the report ...
+   report: ~/result/ma_sim/<folder>/report.html (and report.pdf)
+   ```
+   Add `--gui` to watch the cars in the Isaac window.
+3. Run the same test with the other method, for comparison:
+   ```bash
+   ./run_ma_sim_test.sh --method hq-mpshare
+   ```
+4. Open the reports (the last line of each run names its folder):
+   ```bash
+   xdg-open ~/result/ma_sim/<folder>/report.pdf
+   ```
+5. Read a report from the top:
+   * **Overview:** the room, the route and the paths the cars truly drove.
+   * **1. Each robot's own path:** a table of errors (cm), then one figure per
+     robot: the estimated path over the true one, and the error over time.
+     *Fitted* is the usual ATE (shape only); *anchored* adds the drift since the
+     start; *live* is the pose the robot drove on.
+   * **2. Map merging:** one row per pair (host holding a peer's map): when the
+     maps were first aligned, the final alignment error against the true
+     transform, and how far the peer's keyframes land from where the peer
+     really was; then the error of every alignment over time.
+   * **3. Each robot's map:** its map points and keyframes in 3D and from
+     above, coloured by the robot they came from (circles: own keyframes,
+     triangles: received ones).
+   * **4. Data and settings:** what is in the folder, and the software versions.
+6. For your own analysis: `metrics.json` holds every number; `tables/` the
+   per-keyframe, per-alignment and per-placement errors as CSV; `raw/` all
+   recorded data. After changing the report script, re-score an old run with
+   `~/venvs/env_isaaclab/bin/python src/jetracer_sim/eval/ma_report.py <folder>`.
+7. Variations:
+   * `--name label` puts a label in the folder name; `--settle 40` gives the
+     robots longer to finish sharing after driving.
+   * `MA_NEW_*` settings (§5) apply to every robot:
+     `MA_NEW_VERBOSE=1 ./run_ma_sim_test.sh`.
+   * A different test is a new spec file: copy
+     `src/jetracer_sim/config/ma_room_loop3.json`, change the `route` (a
+     rounded rectangle: `xmin`, `xmax`, `ymin`, `ymax`, corner `radius`), the
+     robots' `start_fraction` along it, `laps` or `speed`, and run
+     `./run_ma_sim_test.sh --spec my_test.json`. Keep the route 0.3 m away from
+     the furniture (`config/room_obstacles.json`, grey in the report's
+     overview) and the corner radius at 0.5 m or more.
+
+### B. Drive three robots yourself with Nav2
+
+1. Start the session:
+   ```bash
+   cd ~/workspaces/ros2_ws
+   ./run_ma_sim_nav.sh
+   ```
+2. Wait about 2 minutes for `Nav2 active on 3 of 3 robots` and `Ready`. Four
+   windows open: Isaac, and one RViz per robot, titled `rviz_sim_1.rviz`,
+   `rviz_sim_2.rviz`, `rviz_sim_3.rviz`. Leave the terminal open: it ends the
+   session.
+3. Arrange the windows. In Isaac, choose **Top** in the viewport's camera menu
+   (camera icon, top left) to see the whole room.
+4. Where the robots start (each robot's map starts at its own start pose,
+   facing +x, the red axis in its RViz):
+
+   | Robot | Colour in the report | Starts at (room) | Facing |
+   |---|---|---|---|
+   | `sim_1` | blue | bottom middle (0.1, −1.6) | east (+x of the room) |
+   | `sim_2` | orange | right side (1.9, 1.25) | north |
+   | `sim_3` | green | left side (−1.7, 1.25) | south |
+
+5. Give a robot a goal: in its RViz window click **2D Goal Pose**, then click
+   the target on the map, hold, drag towards the final heading and release. The
+   blue plan appears and the robot drives. Goals are in that robot's own map,
+   so "1 m ahead" is 1 m in the direction the robot started facing.
+6. Give the other robots goals the same way, at any time, in their own
+   windows. A new goal replaces the current one. To stop a robot without a new
+   goal (any terminal):
+   ```bash
+   ROS_DOMAIN_ID=31 ros2 service call /sim_1/navigate_to_pose/_action/cancel_goal action_msgs/srv/CancelGoal "{}"
+   ```
+   To drive one by keyboard instead (no extra RViz):
+   `ROS_DOMAIN_ID=31 ros2 run jetracer teleop --ros-args -p agent_name:=sim_1`
+   (only while it has no goal).
+7. For the maps to merge, drive the robots through the same parts of the room:
+   a robot must see places another robot has already mapped. The robots see
+   each other with their cameras, like any other obstacle.
+8. End the session: press **Enter** in the terminal (or Ctrl-C). Goals are
+   cancelled, each robot saves its map (this can take up to a minute), the
+   windows close, and the report is written:
+   ```
+   ending: cancelling goals, saving maps ...
+     sim_1: wrote 64 keyframes, wrote 9120 map points, 4 goals   (example numbers)
+   report: ~/result/ma_nav/<folder>/report.html (and report.pdf)
+   ```
+   The report is the same as the route test's, plus a table of the goals you
+   gave (also in `raw/online/<robot>_goals.csv`).
+
+Options: `--method hq-mpshare`, `--name label`, `--headless` (no Isaac window:
+less load; RViz still opens), `--no-rviz`, `--no-report`, `--spec FILE` (other
+robots or start poses: `"starts": [[x, y, heading_deg], ...]`, see
+`config/ma_room_nav3.json`). Each robot has its own TF frames (`sim_1/map_nav`,
+`sim_1/odom`, …), which is what keeps the three Nav2 stacks apart.
+
+## 11. Packages and files
 
 | Path | What |
 |---|---|
@@ -584,7 +753,7 @@ not tracked.
 
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|

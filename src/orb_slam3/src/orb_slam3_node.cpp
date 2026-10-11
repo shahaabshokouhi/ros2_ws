@@ -92,6 +92,15 @@ public:
             result_dir_param_  = this->declare_parameter<std::string>("result_dir", "");
 
             agent_name_ = this->get_name();
+            // Several robots on one /tf (multi-robot simulation): frame_prefix
+            // "sim_1" makes every frame this node and its grid publish
+            // sim_1/map, sim_1/map_nav, sim_1/odom, ... Empty (the robots): unchanged.
+            {
+                const std::string fp = this->declare_parameter<std::string>("frame_prefix", "");
+                frame_prefix_ = fp.empty() ? "" : fp + "/";
+                map_frame_ = frame_prefix_ + "map";
+                camera_frame_ = frame_prefix_ + "camera_color_optical_frame";
+            }
             ma_method_ = this->declare_parameter<std::string>("ma_method", "new");
             // The two multi-agent methods share different things, and sharing
             // both at once is not just wasted bandwidth: ImportHighQualityMapPoints
@@ -180,6 +189,9 @@ public:
             if (this->declare_parameter<bool>("occupancy_grid", false) || nav_frames_) {
                 auto gp = orbslam3_nav::GridParams::declare(this);
                 gp.navFrames = nav_frames_;
+                for (std::string* f : {&gp.globalFrame, &gp.baseFrame, &gp.scanFrame, &gp.odomFrame,
+                                       &gp.cameraFrame, &gp.slamFrame})
+                    *f = frame_prefix_ + *f;
                 grid_ = std::make_unique<orbslam3_nav::OccupancyMapper>(
                     this, slam_.get(), fx_, fy_, cx_, cy_, gp, agent_name_);
                 RCLCPP_INFO(this->get_logger(),
@@ -230,7 +242,7 @@ public:
             //     agent_name_ + "/orb_slam3/image_plane", 10);
             slam_metrics_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>(
                 agent_name_ + "/orb_slam3/slam_metrics", 10);
-            path_msg_.header.frame_id = "map";
+            path_msg_.header.frame_id = map_frame_;
 
             // Tracking (image sync) gets its own callback group so it can be
             // spun on a dedicated thread, isolated from the inter-agent
@@ -460,7 +472,7 @@ private:
         // Create MapPointArray message
         orbslam2_msgs::msg::MapPointArray mappoints_msg;
         mappoints_msg.header.stamp = color_msg->header.stamp;
-        mappoints_msg.header.frame_id = "camera_color_optical_frame";
+        mappoints_msg.header.frame_id = camera_frame_;
         mappoints_msg.agent_name = agent_name_;
 
         if (trackingOk) {
@@ -494,7 +506,7 @@ private:
             geometry_msgs::msg::PoseStamped pose_msg;
             pose_msg.header.stamp = color_msg->header.stamp;
             path_msg_.header.stamp = color_msg->header.stamp;
-            pose_msg.header.frame_id = "map";
+            pose_msg.header.frame_id = map_frame_;
             pose_msg.pose.position.x = tx;
             pose_msg.pose.position.y = ty;
             pose_msg.pose.position.z = tz;
@@ -508,8 +520,8 @@ private:
 
             geometry_msgs::msg::TransformStamped tf_stamped;
             tf_stamped.header.stamp = color_msg->header.stamp;
-            tf_stamped.header.frame_id = "map";
-            tf_stamped.child_frame_id = "camera_color_optical_frame";
+            tf_stamped.header.frame_id = map_frame_;
+            tf_stamped.child_frame_id = camera_frame_;
             tf_stamped.transform.translation.x = tx;
             tf_stamped.transform.translation.y = ty;
             tf_stamped.transform.translation.z = tz;
@@ -711,7 +723,7 @@ private:
 
         sensor_msgs::msg::PointCloud2 cloud_msg;
         cloud_msg.header.stamp = this->get_clock()->now();
-        cloud_msg.header.frame_id = "map";
+        cloud_msg.header.frame_id = map_frame_;
         cloud_msg.height = 1;
         cloud_msg.is_dense = false;
 
@@ -1761,6 +1773,8 @@ private:
     rclcpp::Publisher<orbslam2_msgs::msg::BackObservations>::SharedPtr back_obs_pub_;
     rclcpp::Subscription<orbslam2_msgs::msg::BackObservations>::SharedPtr back_obs_sub_;
     std::string ma_method_;
+    std::string frame_prefix_;                                   // "" or "<prefix>/"
+    std::string map_frame_ = "map", camera_frame_ = "camera_color_optical_frame";
 
     // RGBD-Inertial support (only active when use_imu_)
     bool use_imu_ = false;

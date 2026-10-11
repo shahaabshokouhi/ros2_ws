@@ -1,4 +1,5 @@
 import os
+import re
 import tempfile
 
 from ament_index_python.packages import get_package_share_directory
@@ -114,6 +115,13 @@ def generate_launch_description():
                         'elsewhere, e.g. Isaac Sim through jetracer_sim)'
         ),
         DeclareLaunchArgument(
+            'frame_prefix',
+            default_value='',
+            description='Prefix for every TF frame of this robot (sim_1 -> sim_1/map, '
+                        'sim_1/map_nav, sim_1/odom, ...), for several robots on one /tf '
+                        '(multi-robot simulation). Empty on the robots.'
+        ),
+        DeclareLaunchArgument(
             'extra_params',
             default_value='',
             description='Optional YAML file of orb_slam3_node parameters applied on top '
@@ -152,6 +160,7 @@ def launch_nodes(context):
     camera          = LaunchConfiguration('camera').perform(context).strip().lower() \
         in ('true', '1', 'yes', 'on')
     extra_params    = LaunchConfiguration('extra_params').perform(context).strip()
+    frame_prefix    = LaunchConfiguration('frame_prefix').perform(context).strip()
     nav             = LaunchConfiguration('nav').perform(context).strip().lower() \
         in ('true', '1', 'yes', 'on')
     nav_pose        = LaunchConfiguration('nav_pose').perform(context).strip().lower()
@@ -262,6 +271,7 @@ def launch_nodes(context):
             {'grid.map_half_size': 10.0 if nav else 0.0},   # nav: a 20 x 20 m map from the start
             {'grid.pose_source': nav_pose},
             {'publish_gray': teleop},
+            {'frame_prefix': frame_prefix},
         ] + ([extra_params] if extra_params else []),
     )
 
@@ -298,12 +308,12 @@ def launch_nodes(context):
         ))
 
     if nav:
-        nodes += nav2_nodes(agent)
+        nodes += nav2_nodes(agent, frame_prefix)
 
     return nodes
 
 
-def nav2_nodes(agent):
+def nav2_nodes(agent, frame_prefix=''):
     """Nav2 for one car, in the robot's namespace but on the global /tf.
 
     nav2_bringup's navigation_launch.py remaps /tf to a namespaced tf, where
@@ -312,6 +322,9 @@ def nav2_nodes(agent):
     share = get_package_share_directory('orb_slam3')
     with open(os.path.join(share, 'config', 'nav2_jetracer.yaml')) as f:
         text = f.read()
+    if frame_prefix:   # this robot's frames: <prefix>/map_nav, <prefix>/odom, <prefix>/base_footprint
+        text = re.sub(r'^(\s*(?:global_frame|robot_base_frame):\s*)(\S+)',
+                      lambda m: f'{m.group(1)}{frame_prefix}/{m.group(2)}', text, flags=re.M)
     text = text.replace('__AGENT__', agent).replace(
         '__BT_XML_POSES__', os.path.join(share, 'config', 'navigate_through_poses_car.xml')).replace(
         '__BT_XML__', os.path.join(share, 'config', 'navigate_car.xml'))

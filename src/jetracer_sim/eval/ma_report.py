@@ -159,8 +159,15 @@ class Truth:
         return np.stack([x, y], -1)
 
 
+def has_main(rows):
+    return any(r['in_main_map'] == '1' for r in rows)
+
+
 def keyframes(rows, kind=None, origin=None, main_only=True):
+    """Keyframes of the robot's main map (or, before a map has qualified as
+    main, of its map: short sessions), optionally by kind and origin robot."""
     out = []
+    main_only = main_only and has_main(rows)
     for r in rows:
         if main_only and r['in_main_map'] != '1':
             continue
@@ -360,7 +367,8 @@ def main():
             pm['placement_seam'] = stats([e for k, e in perr if k == 'seam'])
             pm['placement_copy'] = stats([e for k, e in perr if k == 'copy'])
             mp = read_csv(os.path.join(raw, h, 'eval', 'mappoints.csv'))
-            pm['map_points_from_peer'] = sum(r['origin_agent'] == p and r['in_main_map'] == '1' for r in mp)
+            pm['map_points_from_peer'] = sum(r['origin_agent'] == p and (r['in_main_map'] == '1' or not has_main(mp))
+                                             for r in mp)
             pairs[key] = (series, perr)
             metrics['pairs'][key] = pm
 
@@ -408,20 +416,21 @@ def save(fig, figdir, name):
 def make_figures(run, raw, figdir, spec, agents, color, truths, own, kf_rows, T_fit, T_anchor,
                  per_agent, pairs, metrics, t0, dt):
     figs = {}
-    pts = np.array(routes.route_points(spec['route']))
+    pts = np.array(routes.route_points(spec['route'])) if 'route' in spec else None
 
     # Overview: route, true paths, starts.
     fig, ax = plt.subplots(figsize=(5.2, 5.2))
     room(ax)
-    ax.plot(np.r_[pts[:, 0], pts[0, 0]], np.r_[pts[:, 1], pts[0, 1]], color=MUTED, lw=1, ls=(0, (4, 3)),
-            label='planned route')
+    if pts is not None:
+        ax.plot(np.r_[pts[:, 0], pts[0, 0]], np.r_[pts[:, 1], pts[0, 1]], color=MUTED, lw=1, ls=(0, (4, 3)),
+                label='planned route')
     for a, (x, y, yaw) in zip(agents, routes.start_poses(spec)):
         tr = truths[a]
         ax.plot(tr.base[:, 0], tr.base[:, 1], color=color[a], lw=1.6, label=f'{a} (true path)')
         ax.annotate('', xy=(x + 0.3 * math.cos(yaw), y + 0.3 * math.sin(yaw)), xytext=(x, y),
                     arrowprops=dict(arrowstyle='-|>', color=color[a], lw=1.6))
         ax.text(x, y - 0.22, f'{a} start', color=INK2, fontsize=8, ha='center', va='top')
-    ax.set_title('Test route and the true paths driven')
+    ax.set_title('Start poses and the true paths driven' if pts is None else 'Test route and the true paths driven')
     ax.text(0, -HALF + 0.08, 'grey: furniture and props 2-30 cm above the floor', ha='center', fontsize=7, color=MUTED)
     ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.1), ncol=2)
     figs['overview'] = save(fig, figdir, 'overview.png')
@@ -450,7 +459,7 @@ def make_figures(run, raw, figdir, spec, agents, color, truths, own, kf_rows, T_
             ax2.plot(kfe[:, 0], kfe[:, 2] * 100, 's', color=INK2, ms=3, label='keyframes, anchored at the first')
         if oerr is not None:
             ax2.plot(ots - t0, oerr * 100, color=color[a], lw=0.8, alpha=0.7, label='live estimate, fitted')
-        ax2.set_xlabel('time since the cars started driving (s)')
+        ax2.set_xlabel('time since the start (s)')
         ax2.set_ylabel('position error (cm)')
         ax2.set_ylim(bottom=0)
         ax2.set_title('Position error over time')
@@ -499,7 +508,7 @@ def make_figures(run, raw, figdir, spec, agents, color, truths, own, kf_rows, T_
         axes[0, 0].set_title('Map alignment error: translation')
         axes[0, 1].set_title('Map alignment error: rotation')
         for c in (0, 1):
-            axes[-1, c].set_xlabel('time since the cars started driving (s)')
+            axes[-1, c].set_xlabel('time since the start (s)')
         figs['alignment'] = save(fig, figdir, 'alignment_error.png')
 
     # Placement of received keyframes.
@@ -538,7 +547,8 @@ def make_figures(run, raw, figdir, spec, agents, color, truths, own, kf_rows, T_
         handles = []
         clipped = 0
         for a in agents:
-            sel = [r for r in mp if r['in_main_map'] == '1' and r['origin_agent'] == a]
+            main = has_main(mp)
+            sel = [r for r in mp if (r['in_main_map'] == '1' or not main) and r['origin_agent'] == a]
             if not sel:
                 continue
             P = np.array([[float(r['x']), float(r['y']), float(r['z'])] for r in sel])
@@ -586,6 +596,7 @@ def make_figures(run, raw, figdir, spec, agents, color, truths, own, kf_rows, T_
 # ── html ───────────────────────────────────────────────────────────────────
 def write_html(run, spec, agents, color, metrics, figs, env, t0, t_end, dt):
     e = html.escape
+    mode = next((l.split(': ', 1)[1] for l in env.splitlines() if l.startswith('mode: ')), 'test')
     A = metrics['agents']
     P = metrics['pairs']
     dur = f'{t_end - t0:.0f} s' if t_end else '?'
@@ -626,6 +637,15 @@ def write_html(run, spec, agents, color, metrics, figs, env, t0, t_end, dt):
         return f'<figure><img src="{figs[key]}" alt="{e(alt)}"></figure>' if key in figs else ''
 
     paths = ''.join(img(f'traj_{a}', f'{a} path vs ground truth') for a in agents)
+    goal_rows = []
+    for a in agents:
+        g = read_csv(os.path.join(run, 'raw', 'online', f'{a}_goals.csv'))
+        for r in g:
+            goal_rows.append(f'<tr><td>{chip(a)}</td><td>{float(r["wall"]) - t0:.0f} s</td><td>{e(r["frame"])}</td>'
+                             f'<td>{float(r["x"]):.2f}</td><td>{float(r["y"]):.2f}</td>'
+                             f'<td>{math.degrees(float(r["yaw"])):.0f}°</td></tr>')
+    goals = ('<h3>Goals given</h3><table><tr><th>robot</th><th>time</th><th>frame</th><th>x (m)</th>'
+             '<th>y (m)</th><th>heading</th></tr>' + ''.join(goal_rows) + '</table>') if goal_rows else ''
     maps = ''.join(img(f'map_{a}', f'{a} map') for a in agents)
     when = datetime.datetime.fromtimestamp(t0).strftime('%Y-%m-%d %H:%M')
     doc = f'''<!doctype html>
@@ -653,10 +673,11 @@ def write_html(run, spec, agents, color, metrics, figs, env, t0, t_end, dt):
   .scroll {{ overflow-x: auto; }}
   @media print {{ .scroll {{ overflow: visible; }} table {{ font-size: 7.5pt; }} th, td {{ padding: 3px 4px; }} }}
 </style></head><body>
-<h1>Multi-robot simulation test</h1>
-<div class="sub">{e(spec["name"])} · method <b>{e(metrics["method"])}</b> · {len(agents)} robots · {when} · drive {dur}</div>
+<h1>{"Multi-robot navigation session" if "nav" in mode else "Multi-robot simulation test"}</h1>
+<div class="sub">{e(spec["name"])} · method <b>{e(metrics["method"])}</b> · {len(agents)} robots · {when} · {"session" if "nav" in mode else "drive"} {dur}</div>
 <p>{e(spec.get("description", ""))}</p>
 {img("overview", "route and true paths")}
+{goals}
 
 <h2>1. Each robot's own path</h2>
 <p>Errors in centimetres (RMS unless marked). <b>Fitted</b>: the final keyframe trajectory after SLAM's own

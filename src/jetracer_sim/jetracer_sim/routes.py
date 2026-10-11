@@ -77,7 +77,10 @@ def pose_at(pts, s_list, total, s):
 
 
 def start_poses(spec):
-    """[(x, y, yaw_rad)] per agent, on the route at its start fraction."""
+    """[(x, y, yaw_rad)] per agent: the spec's "starts" ([[x, y, yaw_deg], ...])
+    if given, else on the route at each start fraction."""
+    if 'starts' in spec:
+        return [(x, y, math.radians(yaw)) for x, y, yaw in spec['starts']]
     pts = route_points(spec['route'])
     s_list, total = cumulative(pts)
     return [pose_at(pts, s_list, total, f * total) for f in spec['start_fraction']]
