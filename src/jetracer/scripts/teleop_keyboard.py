@@ -3,11 +3,12 @@
 
     ros2 run jetracer teleop --ros-args -p agent_name:=agent_2
 
-Publishes geometry_msgs/Twist on /<agent_name>/cmd_vel at 20 Hz, which the
-robot's base driver (`jetracer`) executes. Hold a key to move: the command
-drops to zero hold_timeout seconds after the last key press, and the base
-driver stops the motors on its own after 1 s without any command (for
-example when Wi-Fi drops).
+Publishes geometry_msgs/Twist on /<agent_name>/cmd_vel at 20 Hz while the
+car is driven, which the robot's base driver (`jetracer`) executes. Hold a
+key to move: the command drops to zero hold_timeout seconds after the last
+key press; a few zero commands follow and then nothing, so an idle keyboard
+does not fight Nav2 on the same topic. The base driver stops the motors on
+its own after 1 s without any command (for example when Wi-Fi drops).
 
   w / s  or  arrow up / down     forward / backward
   q / e                          forward while turning left / right
@@ -130,12 +131,20 @@ def main():
     try:
         tty.setcbreak(fd)
         period, next_pub = 0.05, time.monotonic()
+        stops_left = 0       # zero commands still to send after the car was driven
         while rclpy.ok():
             for k in read_keys(fd, max(0.0, next_pub - time.monotonic())):
                 node.key(k)
+                if k in (' ', 'x'):
+                    stops_left = 5
             if time.monotonic() >= next_pub:
                 cmd = node.command()
-                node.pub.publish(cmd)
+                if cmd.linear.x or cmd.angular.z:
+                    node.pub.publish(cmd)
+                    stops_left = 5
+                elif stops_left > 0:
+                    node.pub.publish(cmd)
+                    stops_left -= 1
                 next_pub += period
                 sys.stdout.write(f'\r  linear {cmd.linear.x:+.2f} m/s  angular {cmd.angular.z:+.2f} rad/s'
                                  f'   (speed {node.speed:.2f} m/s, turn {node.turn:.2f} rad/s)   ')
