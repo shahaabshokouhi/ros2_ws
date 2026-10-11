@@ -263,7 +263,7 @@ Every test writes a new folder, `~/result/ma_sim/<date>_<time>_<name>_<method>/`
 |---|---|
 | `report.html`, `report.pdf` | the report: figures and tables below |
 | `metrics.json` | every number in the report |
-| `figures/` | route overview, path vs ground truth per robot, accuracy summary, alignment error over time, placement of received keyframes, each robot's map in 3D and from above (points and keyframes coloured by the robot they came from) |
+| `figures/` | route overview, path vs ground truth per robot, accuracy summary, alignment error over time, placement of received keyframes, coverage (own vs integrated map, per robot and summary), each robot's map in 3D and from above (points and keyframes coloured by the robot they came from) |
 | `tables/` | per-keyframe, live-pose, alignment and placement errors (CSV) |
 | `raw/` | everything needed to re-score or analyse further: the spec, `gt/<robot>_gt.csv` (truth every step), `<robot>/eval/*.csv` (keyframes, map points with their origin robot, alignments, match verifications, timing, costs), `online/<robot>_online.csv` (the live SLAM pose), all logs, software versions (`env.txt`) |
 
@@ -278,6 +278,10 @@ What is measured:
   maps' first keyframes, so it does not inherit drift); where the peer's
   keyframes land in the host's map against where the peer's camera truly was;
   match verifications passed / tried; how many of the peer's points the host holds.
+* **Coverage**, per robot: its own map against its integrated map (own +
+  received): map points, occupied 10 cm cubes, floor area, and the share of
+  the team's map it knows, alone and with sharing. The own map stands in for
+  a single-robot method on the same drive.
 
 Re-score a run (for example after changing the report): `~/venvs/env_isaaclab/bin/python
 src/jetracer_sim/eval/ma_report.py <run folder>` (Isaac's Python has the
@@ -661,10 +665,17 @@ an Isaac window asks "Save changes?", always answer **Don't save**.
      maps were first aligned, the final alignment error against the true
      transform, and how far the peer's keyframes land from where the peer
      really was; then the error of every alignment over time.
-   * **3. Each robot's map:** its map points and keyframes in 3D and from
+   * **3. Coverage, own map vs integrated map:** what sharing adds. Per robot,
+     its own map (what a single-robot method would have built on the same
+     drive) next to its whole map at the end (own + received), in 3D and as a
+     floor plan coloured by which robot added each part; a table and a chart of
+     map points, occupied 10 cm cubes, floor area (m²) and the share of the
+     team's map (all robots' own maps together) the robot knows, alone and with
+     sharing.
+   * **4. Each robot's map:** its map points and keyframes in 3D and from
      above, coloured by the robot they came from (circles: own keyframes,
      triangles: received ones).
-   * **4. Data and settings:** what is in the folder, and the software versions.
+   * **5. Data and settings:** what is in the folder, and the software versions.
 6. For your own analysis: `metrics.json` holds every number; `tables/` the
    per-keyframe, per-alignment and per-placement errors as CSV; `raw/` all
    recorded data. After changing the report script, re-score an old run with

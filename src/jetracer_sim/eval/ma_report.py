@@ -28,7 +28,12 @@ What it measures:
    - Placement error: each of P's keyframes as it sits in H's map (fused
      "seam" keyframes and "copies"), placed in the world through H's map
      origin, against where P's camera truly was at that time.
-3. Figures: route overview, path vs ground truth per robot, the accuracy
+3. Coverage: each robot's own map (what a single-robot method would have
+   built in the same run) against its integrated map (own + everything
+   received from the others): map points, occupied 10 cm cubes (3D), occupied
+   10 cm floor cells (m^2), and the share of the team's map (all robots' own
+   maps together) that the robot knows, alone and with sharing.
+4. Figures: route overview, path vs ground truth per robot, the accuracy
    summary, alignment error over time, placement errors, and each robot's
    map in 3D (map points and keyframes coloured by the robot they came from).
 
@@ -372,13 +377,160 @@ def main():
             pairs[key] = (series, perr)
             metrics['pairs'][key] = pm
 
+    # 3. coverage: own map vs integrated map
+    cov_pts, team_vox, team_cells = coverage_points(raw, agents, T_fit)
+    for h, d in cov_pts.items():
+        own_v, int_v = voxels(d['own']), voxels(d['all'])
+        own_c, int_c = cells(d['own']), cells(d['all'])
+        c = {'own_points': int(len(d['own'])), 'integrated_points': int(len(d['all'])),
+             'own_voxels': len(own_v), 'integrated_voxels': len(int_v),
+             'own_area_m2': len(own_c) * CELL ** 2, 'integrated_area_m2': len(int_c) * CELL ** 2,
+             'team_voxels': len(team_vox), 'team_area_m2': len(team_cells) * CELL ** 2}
+        c['voxel_gain'] = c['integrated_voxels'] / max(1, c['own_voxels']) - 1
+        c['area_gain'] = c['integrated_area_m2'] / max(1e-9, c['own_area_m2']) - 1
+        c['team_share_own'] = len(own_v & team_vox) / max(1, len(team_vox))
+        c['team_share_integrated'] = len(int_v & team_vox) / max(1, len(team_vox))
+        metrics['agents'][h]['coverage'] = c
+    with open(os.path.join(tabdir, 'coverage.csv'), 'w') as f:
+        keys = ['own_points', 'integrated_points', 'own_voxels', 'integrated_voxels', 'voxel_gain', 'own_area_m2',
+                'integrated_area_m2', 'area_gain', 'team_share_own', 'team_share_integrated']
+        f.write('robot,' + ','.join(keys) + '\n')
+        for h in cov_pts:
+            c = metrics['agents'][h]['coverage']
+            f.write(h + ',' + ','.join(f'{c[k]:.4f}' if isinstance(c[k], float) else str(c[k]) for k in keys) + '\n')
+
     with open(os.path.join(run, 'metrics.json'), 'w') as f:
         json.dump(metrics, f, indent=2)
 
     figs = make_figures(run, raw, figdir, spec, agents, color, truths, own, kf_rows, T_fit, T_anchor,
                         per_agent, pairs, metrics, t0, dt)
+    figs.update(coverage_figures(figdir, agents, color, cov_pts, metrics))
     write_html(run, spec, agents, color, metrics, figs, env, t0, t_end, dt)
     print(f'report: {os.path.join(run, "report.html")}')
+
+
+# ── coverage ───────────────────────────────────────────────────────────────
+VOXEL = 0.10     # m, 3D coverage cubes
+CELL = 0.10      # m, floor-plan coverage cells
+
+
+def in_room(W):
+    return (np.abs(W[:, 0]) < HALF + 0.5) & (np.abs(W[:, 1]) < HALF + 0.5) & (W[:, 2] > -0.3) & (W[:, 2] < 2.3)
+
+
+def coverage_points(raw, agents, T_fit):
+    """Per robot, its map points in the world frame (through its fitted
+    placement): own ones, all of them, and per origin robot; plus the team's
+    map (every robot's own points) as voxels and floor cells."""
+    out, team_v, team_c = {}, set(), set()
+    for h in agents:
+        if h not in T_fit:
+            continue
+        mp = read_csv(os.path.join(raw, h, 'eval', 'mappoints.csv'))
+        if not mp:
+            continue
+        main = has_main(mp)
+        rows = [r for r in mp if r['in_main_map'] == '1' or not main]
+        if not rows:
+            continue
+        P = np.array([[float(r['x']), float(r['y']), float(r['z'])] for r in rows])
+        org = np.array([r['origin_agent'] for r in rows])
+        T = T_fit[h]
+        W = P @ T[:3, :3].T + T[:3, 3]
+        keep = in_room(W)
+        W, org = W[keep], org[keep]
+        out[h] = {'own': W[org == h], 'all': W, 'by_origin': {a: W[org == a] for a in agents}}
+        team_v |= voxels(W[org == h])
+        team_c |= cells(W[org == h])
+    return out, team_v, team_c
+
+
+def voxels(W):
+    return set(map(tuple, np.floor(W / VOXEL).astype(int))) if len(W) else set()
+
+
+def cells(W):
+    return set(map(tuple, np.floor(W[:, :2] / CELL).astype(int))) if len(W) else set()
+
+
+def coverage_figures(figdir, agents, color, cov_pts, metrics):
+    figs = {}
+    hosts = [h for h in agents if h in cov_pts]
+    if not hosts:
+        return figs
+    # Summary: share of the team's map each robot knows, alone and with sharing.
+    fig, axes = plt.subplots(1, 2, figsize=(10, 3.6))
+    x = np.arange(len(hosts))
+    for ax, (k_own, k_int, title, scale, unit) in zip(axes, [
+            ('team_share_own', 'team_share_integrated', "Share of the team's map this robot knows", 100, '%'),
+            ('own_area_m2', 'integrated_area_m2', 'Floor area covered by the map', 1, 'm²')]):
+        for i, h in enumerate(hosts):
+            c = metrics['agents'][h]['coverage']
+            vo, vi = c[k_own] * scale, c[k_int] * scale
+            ax.bar(i - 0.2, vo, width=0.38, color=color[h], alpha=0.35, hatch='///', edgecolor=color[h], lw=0)
+            ax.bar(i + 0.2, vi, width=0.38, color=color[h])
+            for xx, v in ((i - 0.2, vo), (i + 0.2, vi)):
+                ax.text(xx, v, f'{v:.0f}{unit}' if unit == '%' else f'{v:.1f}', ha='center', va='bottom', fontsize=7, color=INK2)
+        ax.set_xticks(x)
+        ax.set_xticklabels(hosts)
+        ax.set_title(title)
+        ax.set_ylabel(unit if unit != '%' else 'percent of all robots\' own maps together')
+        ax.grid(axis='x', visible=False)
+    fig.legend(handles=[plt.Rectangle((0, 0), 1, 1, fc=MUTED, alpha=0.35, hatch='///', ec=MUTED, lw=0),
+                        plt.Rectangle((0, 0), 1, 1, fc=INK2)],
+               labels=['own map only (single robot)', 'integrated map (multi-robot)'],
+               loc='lower center', ncol=2, bbox_to_anchor=(0.5, -0.06))
+    figs['coverage'] = save(fig, figdir, 'coverage_summary.png')
+
+    # Per robot: own vs integrated point cloud in 3D, and the floor plan of who added what.
+    for h in hosts:
+        d = cov_pts[h]
+        c = metrics['agents'][h]['coverage']
+        fig = plt.figure(figsize=(13, 4.6))
+        gs = fig.add_gridspec(1, 3, width_ratios=[1, 1, 0.85], wspace=0.3)
+        for col, (title, sets) in enumerate([
+                (f'{h}: own map only\n{c["own_points"]} points, {c["own_voxels"]} cubes of 10 cm', [(h, d['own'])]),
+                (f'{h}: integrated map\n{c["integrated_points"]} points, {c["integrated_voxels"]} cubes '
+                 f'(+{100 * c["voxel_gain"]:.0f} %)', [(a, d['by_origin'][a]) for a in agents])]):
+            ax = fig.add_subplot(gs[col], projection='3d')
+            for a, W in sets:
+                if len(W):
+                    ax.scatter(W[:, 0], W[:, 1], W[:, 2], s=0.5 if a == h else 0.9, color=color[a],
+                               alpha=0.5 if a == h else 0.8, lw=0, depthshade=False)
+            ax.set_xlim(-HALF, HALF)
+            ax.set_ylim(-HALF, HALF)
+            ax.set_zlim(-0.1, 2.1)
+            ax.set_zticks([0, 1, 2])
+            ax.set_box_aspect((2 * HALF, 2 * HALF, 2.2), zoom=0.95)
+            ax.view_init(elev=28, azim=-60)
+            ax.tick_params(labelsize=6, pad=0)
+            ax.set_title(title, fontsize=9)
+        ax2 = fig.add_subplot(gs[2])
+        room(ax2)
+        own_c = cells(d['own'])
+        img = np.full((int(2 * (HALF + 0.5) / CELL), int(2 * (HALF + 0.5) / CELL), 4), 0.0)
+        off = int((HALF + 0.5) / CELL)
+
+        def paint(cs, rgba):
+            for cx, cy in cs:
+                i, j = cy + off, cx + off
+                if 0 <= i < img.shape[0] and 0 <= j < img.shape[1] and img[i, j, 3] == 0:
+                    img[i, j] = rgba
+        paint(own_c, matplotlib.colors.to_rgba(color[h], 0.9))
+        for a in agents:
+            if a != h:
+                paint(cells(d['by_origin'][a]) - own_c, matplotlib.colors.to_rgba(color[a], 0.9))
+        ax2.imshow(img, origin='lower', extent=(-HALF - 0.5, HALF + 0.5, -HALF - 0.5, HALF + 0.5),
+                   interpolation='nearest', zorder=1)
+        ax2.set_xlim(-HALF - 0.15, HALF + 0.15)
+        ax2.set_ylim(-HALF - 0.15, HALF + 0.15)
+        ax2.set_title(f'{h}: floor plan of the map\n{c["own_area_m2"]:.1f} m² own, {c["integrated_area_m2"]:.1f} m² '
+                      f'integrated (+{100 * c["area_gain"]:.0f} %)', fontsize=9)
+        handles = [Line2D([], [], ls='', marker='s', ms=7, color=color[h], label=f'{h} (own)')]
+        handles += [Line2D([], [], ls='', marker='s', ms=7, color=color[a], label=f'added by {a}') for a in agents if a != h]
+        fig.legend(handles=handles, loc='lower center', ncol=len(handles), bbox_to_anchor=(0.5, -0.04))
+        figs[f'coverage_{h}'] = save(fig, figdir, f'coverage_{h}.png')
+    return figs
 
 
 # ── figures ────────────────────────────────────────────────────────────────
@@ -647,6 +799,17 @@ def write_html(run, spec, agents, color, metrics, figs, env, t0, t_end, dt):
     goals = ('<h3>Goals given</h3><table><tr><th>robot</th><th>time</th><th>frame</th><th>x (m)</th>'
              '<th>y (m)</th><th>heading</th></tr>' + ''.join(goal_rows) + '</table>') if goal_rows else ''
     maps = ''.join(img(f'map_{a}', f'{a} map') for a in agents)
+    crow = []
+    for a in agents:
+        c = A[a].get('coverage')
+        if not c:
+            continue
+        crow.append(f'<tr><td>{chip(a)}</td><td>{c["own_points"]}</td><td>{c["integrated_points"]}</td>'
+                    f'<td>{c["own_voxels"]}</td><td>{c["integrated_voxels"]}</td><td>+{100 * c["voxel_gain"]:.0f}&nbsp;%</td>'
+                    f'<td>{c["own_area_m2"]:.1f}</td><td>{c["integrated_area_m2"]:.1f}</td><td>+{100 * c["area_gain"]:.0f}&nbsp;%</td>'
+                    f'<td>{100 * c["team_share_own"]:.0f}&nbsp;% → {100 * c["team_share_integrated"]:.0f}&nbsp;%</td></tr>')
+    cov_table = ''.join(crow)
+    cov_maps = ''.join(img(f'coverage_{a}', f'{a} own vs integrated map') for a in agents)
     when = datetime.datetime.fromtimestamp(t0).strftime('%Y-%m-%d %H:%M')
     doc = f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -701,17 +864,30 @@ map, against where the peer's camera truly was. <b>Checks</b>: geometric match v
 {img("alignment", "alignment error over time")}
 {img("placement", "placement error")}
 
-<h2>3. Each robot's map</h2>
+<h2>3. Coverage: own map vs integrated map</h2>
+<p>What sharing adds to each robot's map. <b>Own</b>: only the map points the robot made itself, which is what a
+single-robot method would have built on the same drive. <b>Integrated</b>: its whole map at the end, own points plus those
+received from the others. Coverage counts space, not points: <b>cubes</b> are 10 cm cubes of the room that contain at
+least one map point, <b>floor area</b> the 10 cm floor cells with a point above them (any height). <b>Team share</b>:
+of everything the robots mapped together (all robots' own maps), the part this robot's map covers, alone → with sharing.
+All maps are placed in the room through each robot's fitted path; points outside the room are left out.</p>
+<div class="scroll"><table><tr><th>robot</th><th>own points</th><th>integrated points</th><th>own cubes</th>
+<th>integrated cubes</th><th>gain</th><th>own floor (m²)</th><th>integrated floor (m²)</th><th>gain</th><th>team share</th></tr>
+{cov_table}</table></div>
+{img("coverage", "coverage summary")}
+{cov_maps}
+
+<h2>4. Each robot's map</h2>
 <p>Map points (small dots) and keyframes (circles: the robot's own; triangles: received) in each robot's main map at
 the end of the run, coloured by the robot they came from, shown in the world frame through the robot's fitted
 placement.</p>
 {maps}
 
-<h2>4. Data and settings</h2>
+<h2>5. Data and settings</h2>
 <dl><dt>run folder</dt><dd>{e(run)}</dd>
 <dt>raw data</dt><dd>raw/: spec.json, gt/&lt;robot&gt;_gt.csv (truth every simulation step), &lt;robot&gt;/eval/*.csv
 (keyframes, map points, alignments, verifications, timing), online/&lt;robot&gt;_online.csv (live poses), logs</dd>
-<dt>tables</dt><dd>tables/: per-keyframe, live-pose, alignment and placement errors (CSV)</dd>
+<dt>tables</dt><dd>tables/: per-keyframe, live-pose, alignment and placement errors, coverage (CSV)</dd>
 <dt>metrics</dt><dd>metrics.json (everything in this report as numbers)</dd>
 <dt>clock offset</dt><dd>{dt * 1000:.0f} ms between image stamps and the truth log (fitted)</dd>
 <dt>re-score</dt><dd>~/venvs/env_isaaclab/bin/python ~/workspaces/ros2_ws/src/jetracer_sim/eval/ma_report.py &lt;run folder&gt;</dd></dl>
