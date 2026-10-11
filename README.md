@@ -42,8 +42,8 @@ need first.
 | I want to… | On the robot | On the PC |
 |---|---|---|
 | Run SLAM on one robot | `./run_slam3.sh` | `./run_rviz.sh <agent>` to watch |
-| Run the multi-robot keyframe-sharing method (the research method) | `./run_slam3.sh --method new` on **every** robot | |
-| Run the original map-point-sharing method | `./run_slam3.sh` (or `--method hq-mpshare`) on every robot | |
+| Run the multi-robot keyframe-sharing method (the research method) | `./run_slam3.sh` (the default, same as `--method new`) on **every** robot | |
+| Run the original map-point-sharing method | `./run_slam3.sh --method hq-mpshare` on every robot | |
 | Get an occupancy grid for planning | `./run_slam3.sh --grid` | `./run_rviz.sh <agent>` |
 | Drive one robot from the PC keyboard | `./run_slam3.sh --teleop` | `./run_teleop.sh <agent>` (opens RViz too) |
 | Send one robot to a point (Nav2) | `./run_slam3.sh --nav` (add `--teleop` to also see its camera) | `./run_rviz.sh <agent>`, then the **2D Goal Pose** button |
@@ -116,8 +116,8 @@ node, plus whatever the flags add.
 
 | Flag | Effect |
 |---|---|
-| *(none)* | RealSense + ORB-SLAM3 (RGB-D) + multi-robot map sharing with method `hq-mpshare`. |
-| `--method new` | Multi-robot method: `hq-mpshare` (share high-quality map points; the default) or `new` (keyframe sharing, the current research method). Every robot in a run must use the same method. See the ORB_SLAM3 README. |
+| *(none)* | RealSense + ORB-SLAM3 (RGB-D) + multi-robot map sharing with method `new` (keyframe sharing). |
+| `--method M` | Multi-robot method: `new` (keyframe sharing, the current research method; the default) or `hq-mpshare` (share high-quality map points). Every robot in a run must use the same method. See the ORB_SLAM3 README. |
 | `--imu` / `--imu-auto` / `--no-imu` | RGB-D-inertial (`--imu`), inertial only if the settings file has `IMU.T_b_c1` (`--imu-auto`), or plain RGB-D (`--no-imu`, the default; inertial initialisation drifts while standing still). |
 | `--save` | Also save every keyframe's RGB, depth and final pose as a `slam_00N` dataset under `$RESULT_DIR` (default `~/result`), for offline reconstruction. |
 | `--monitor`, `--monitor-rate HZ` | Also run the Jetson hardware monitor (`/<agent>/jetson/metrics`: CPU, GPU, RAM, power, temperatures), default 2 Hz. |
@@ -247,7 +247,7 @@ What `run_slam3.sh` (and, without camera and driver, `run_sim_slam.sh`) runs.
 |---|---|---|
 | `agent` | `agent_0` | robot name; node name and topic prefix |
 | `vocab_file`, `settings_file` | — | ORB vocabulary, ORB-SLAM3 camera settings |
-| `ma_method` | `hq-mpshare` | multi-robot method: `hq-mpshare` or `new` |
+| `ma_method` | `new` | multi-robot method: `new` or `hq-mpshare` |
 | `use_imu` | `false` | `false` / `true` / `auto` |
 | `save_keyframes`, `result_dir` | `false`, `` | `--save` |
 | `tracking_cpu`, `tracking_rtprio` | `-1`, `0` | pin / prioritise the tracking thread |
@@ -295,7 +295,7 @@ JetRacer.
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `ma_method` | `hq-mpshare` | multi-robot method |
+| `ma_method` | `new` | multi-robot method |
 | `use_imu` | `false` | `false` / `true` / `auto` |
 | `save_keyframes`, `result_dir`, `output_dir` | `false`, `` , `.` | keyframe dataset; where shutdown exports go |
 | `tracking_cpu`, `tracking_rtprio` | `-1`, `0` | tracking thread pinning / priority |

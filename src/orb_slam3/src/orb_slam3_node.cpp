@@ -92,7 +92,7 @@ public:
             result_dir_param_  = this->declare_parameter<std::string>("result_dir", "");
 
             agent_name_ = this->get_name();
-            ma_method_ = this->declare_parameter<std::string>("ma_method", "hq-mpshare");
+            ma_method_ = this->declare_parameter<std::string>("ma_method", "new");
             // The two multi-agent methods share different things, and sharing
             // both at once is not just wasted bandwidth: ImportHighQualityMapPoints
             // maintains its own per-keyframe HQ-BoW for the hq-mpshare matcher,

@@ -9,7 +9,7 @@
 # Usage:
 #   ./run_slam3.sh                 # run SLAM, do NOT save keyframes (default)
 #   ./run_slam3.sh --save          # also save keyframes for offline neural SDF
-#   ./run_slam3.sh --method new    # use BoW-sharing multi-agent method
+#   ./run_slam3.sh --method hq-mpshare   # use the map-point-sharing method (default: new, keyframe sharing)
 #   ./run_slam3.sh --save --method new   # combine flags
 #   ./run_slam3.sh --grid          # also publish a Nav2 occupancy grid (/<agent>/map)
 #   ./run_slam3.sh --teleop        # single-robot test: drive it from another computer's
@@ -26,7 +26,7 @@
 # the RESULT_DIR environment variable.
 
 SAVE_KEYFRAMES=false
-MA_METHOD="hq-mpshare"
+MA_METHOD="new"
 MONITOR=false
 MONITOR_RATE=2.0
 # IMU / RGBD-Inertial mode:
@@ -87,7 +87,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "Unknown argument: $1"
-            echo "Usage: ./run_slam3.sh [--save] [--method hq-mpshare|new] [--imu|--imu-auto|--no-imu]"
+            echo "Usage: ./run_slam3.sh [--save] [--method new|hq-mpshare] [--imu|--imu-auto|--no-imu]"
             echo "                      [--monitor] [--monitor-rate HZ] [--grid] [--teleop] [--nav|--nav-wheels]"
             exit 1
             ;;

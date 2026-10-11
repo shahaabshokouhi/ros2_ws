@@ -51,8 +51,8 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'ma_method',
-            default_value='hq-mpshare',
-            description='Multi-agent method: hq-mpshare (map point sharing) or new (BoW sharing)'
+            default_value='new',
+            description='Multi-agent method: new (keyframe sharing, the default) or hq-mpshare (map point sharing)'
         ),
         DeclareLaunchArgument(
             'use_imu',
