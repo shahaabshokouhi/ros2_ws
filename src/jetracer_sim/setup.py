@@ -19,11 +19,12 @@ setup(
     zip_safe=True,
     maintainer='Shahab Shokouhi',
     maintainer_email='shokohishahab@gmail.com',
-    description='Isaac Sim stand-in for one JetRacer',
+    description='Isaac Sim stand-in for JetRacers (one, or several for multi-robot tests)',
     license='MIT',
     entry_points={
         'console_scripts': [
             'cmd_vel_to_ackermann = jetracer_sim.cmd_vel_to_ackermann:main',
+            'route_driver = jetracer_sim.route_driver:main',
         ],
     },
 )

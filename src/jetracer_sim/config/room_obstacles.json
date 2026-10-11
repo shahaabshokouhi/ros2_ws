@@ -1,0 +1,908 @@
+{
+ "description": "Footprints (axis-aligned, world frame) of everything 2-30 cm above the floor in the furnished room (jetracer3.usd props + room_dressing.py furniture), from a stage survey on 2026-10-11. Used to draw the room in multi-robot test reports.",
+ "walls_inner_half_size": 2.975,
+ "objects": [
+  {
+   "name": "SceneObjects/box/Aligned/Scan_Scan_009",
+   "x": [
+    1.314,
+    1.593
+   ],
+   "y": [
+    -0.97,
+    -0.684
+   ]
+  },
+  {
+   "name": "SceneObjects/mug/_______002/_______002/_______006",
+   "x": [
+    0.768,
+    0.878
+   ],
+   "y": [
+    0.635,
+    0.722
+   ]
+  },
+  {
+   "name": "SceneObjects/toy_truck/Aligned/wanjukache_wanjukache_007",
+   "x": [
+    0.381,
+    0.502
+   ],
+   "y": [
+    0.43,
+    0.484
+   ]
+  },
+  {
+   "name": "SceneObjects/nvidia_cube/S_NvidiaCube",
+   "x": [
+    0.749,
+    0.814
+   ],
+   "y": [
+    0.514,
+    0.579
+   ]
+  },
+  {
+   "name": "SceneObjects/small_KLT_visual/Visuals/FOF_Mesh_Magenta_Box",
+   "x": [
+    -0.068,
+    0.13
+   ],
+   "y": [
+    -0.969,
+    -0.672
+   ]
+  },
+  {
+   "name": "SceneObjects/o3dyn_pallet/SM_PlasticTape_A1_002",
+   "x": [
+    -1.388,
+    -0.185
+   ],
+   "y": [
+    0.542,
+    1.344
+   ]
+  },
+  {
+   "name": "SceneObjects/o3dyn_pallet/SM_PalletWood_B1_002",
+   "x": [
+    -1.386,
+    -0.186
+   ],
+   "y": [
+    0.545,
+    1.341
+   ]
+  },
+  {
+   "name": "SceneObjects/o3dyn_pallet/SM_BoxPlastic_EuroCasePolyethylene_C2_017",
+   "x": [
+    -0.786,
+    -0.186
+   ],
+   "y": [
+    0.543,
+    0.943
+   ]
+  },
+  {
+   "name": "SceneObjects/o3dyn_pallet/SM_BoxPlastic_EuroCasePolyethylene_C2_018",
+   "x": [
+    -0.786,
+    -0.186
+   ],
+   "y": [
+    0.943,
+    1.343
+   ]
+  },
+  {
+   "name": "SceneObjects/o3dyn_pallet/SM_BoxPlastic_EuroCasePolyethylene_C2_019",
+   "x": [
+    -1.386,
+    -0.786
+   ],
+   "y": [
+    0.943,
+    1.343
+   ]
+  },
+  {
+   "name": "SceneObjects/o3dyn_pallet/SM_BoxPlastic_EuroCasePolyethylene_C2_020",
+   "x": [
+    -1.386,
+    -0.786
+   ],
+   "y": [
+    0.543,
+    0.943
+   ]
+  },
+  {
+   "name": "SceneObjects/pallet/Xform/Mesh_015",
+   "x": [
+    2.284,
+    2.961
+   ],
+   "y": [
+    0.792,
+    1.594
+   ]
+  },
+  {
+   "name": "SceneObjects/_35_power_drill/_35_power_drill",
+   "x": [
+    0.897,
+    1.082
+   ],
+   "y": [
+    -0.731,
+    -0.544
+   ]
+  },
+  {
+   "name": "SceneObjects/dolly/Visual/FOF_Mesh_Shelf_Cart_B_LOD0",
+   "x": [
+    -2.852,
+    -2.002
+   ],
+   "y": [
+    -2.961,
+    -1.702
+   ]
+  },
+  {
+   "name": "SceneObjects/dolly/Visual/FOF_Shelf_Cart_B_Swiveling_Wheel1_LOD0",
+   "x": [
+    -2.807,
+    -2.684
+   ],
+   "y": [
+    -2.873,
+    -2.764
+   ]
+  },
+  {
+   "name": "SceneObjects/dolly/Visual/FOF_Shelf_Cart_B_wheel1_LOD0",
+   "x": [
+    -2.787,
+    -2.617
+   ],
+   "y": [
+    -2.851,
+    -2.788
+   ]
+  },
+  {
+   "name": "SceneObjects/dolly/Visual/FOF_Shelf_Cart_B_Swiveling_Wheel2_LOD0",
+   "x": [
+    -2.149,
+    -2.026
+   ],
+   "y": [
+    -2.869,
+    -2.76
+   ]
+  },
+  {
+   "name": "SceneObjects/dolly/Visual/FOF_Shelf_Cart_B_wheel2_LOD0",
+   "x": [
+    -2.216,
+    -2.046
+   ],
+   "y": [
+    -2.85,
+    -2.788
+   ]
+  },
+  {
+   "name": "SceneObjects/dolly/Visual/FOF_Shelf_Cart_B_Swiveling_Wheel4_LOD0",
+   "x": [
+    -2.808,
+    -2.685
+   ],
+   "y": [
+    -1.9,
+    -1.792
+   ]
+  },
+  {
+   "name": "SceneObjects/dolly/Visual/FOF_Shelf_Cart_B_wheel4_LOD0",
+   "x": [
+    -2.787,
+    -2.617
+   ],
+   "y": [
+    -1.876,
+    -1.814
+   ]
+  },
+  {
+   "name": "SceneObjects/dolly/Visual/FOF_Shelf_Cart_B_Swiveling_Wheel3_LOD0",
+   "x": [
+    -2.15,
+    -2.026
+   ],
+   "y": [
+    -1.9,
+    -1.792
+   ]
+  },
+  {
+   "name": "SceneObjects/dolly/Visual/FOF_Shelf_Cart_B_wheel3_LOD0",
+   "x": [
+    -2.216,
+    -2.046
+   ],
+   "y": [
+    -1.876,
+    -1.814
+   ]
+  },
+  {
+   "name": "Cardbox_A1/Cardbox_A1",
+   "x": [
+    2.202,
+    2.901
+   ],
+   "y": [
+    -2.887,
+    -2.366
+   ]
+  },
+  {
+   "name": "Pallet_B1/Pallet_B1",
+   "x": [
+    1.674,
+    2.885
+   ],
+   "y": [
+    -2.934,
+    -1.931
+   ]
+  },
+  {
+   "name": "RoomDressing/post_16",
+   "x": [
+    -2.395,
+    -2.365
+   ],
+   "y": [
+    2.56,
+    2.59
+   ]
+  },
+  {
+   "name": "RoomDressing/post_17",
+   "x": [
+    -2.395,
+    -2.365
+   ],
+   "y": [
+    2.92,
+    2.95
+   ]
+  },
+  {
+   "name": "RoomDressing/post_18",
+   "x": [
+    -0.835,
+    -0.805
+   ],
+   "y": [
+    2.56,
+    2.59
+   ]
+  },
+  {
+   "name": "RoomDressing/post_19",
+   "x": [
+    -0.835,
+    -0.805
+   ],
+   "y": [
+    2.92,
+    2.95
+   ]
+  },
+  {
+   "name": "RoomDressing/board_20",
+   "x": [
+    -2.4,
+    -0.8
+   ],
+   "y": [
+    2.555,
+    2.955
+   ]
+  },
+  {
+   "name": "RoomDressing/book_21",
+   "x": [
+    -2.35,
+    -2.311
+   ],
+   "y": [
+    2.615,
+    2.895
+   ]
+  },
+  {
+   "name": "RoomDressing/book_22",
+   "x": [
+    -2.307,
+    -2.259
+   ],
+   "y": [
+    2.615,
+    2.895
+   ]
+  },
+  {
+   "name": "RoomDressing/book_23",
+   "x": [
+    -2.255,
+    -2.196
+   ],
+   "y": [
+    2.615,
+    2.895
+   ]
+  },
+  {
+   "name": "RoomDressing/book_24",
+   "x": [
+    -2.192,
+    -2.145
+   ],
+   "y": [
+    2.615,
+    2.895
+   ]
+  },
+  {
+   "name": "RoomDressing/shelf_box_25",
+   "x": [
+    -2.141,
+    -1.847
+   ],
+   "y": [
+    2.595,
+    2.915
+   ]
+  },
+  {
+   "name": "RoomDressing/book_26",
+   "x": [
+    -1.761,
+    -1.731
+   ],
+   "y": [
+    2.615,
+    2.895
+   ]
+  },
+  {
+   "name": "RoomDressing/book_27",
+   "x": [
+    -1.727,
+    -1.684
+   ],
+   "y": [
+    2.615,
+    2.895
+   ]
+  },
+  {
+   "name": "RoomDressing/book_28",
+   "x": [
+    -1.68,
+    -1.619
+   ],
+   "y": [
+    2.615,
+    2.895
+   ]
+  },
+  {
+   "name": "RoomDressing/shelf_box_29",
+   "x": [
+    -1.615,
+    -1.409
+   ],
+   "y": [
+    2.595,
+    2.915
+   ]
+  },
+  {
+   "name": "RoomDressing/book_30",
+   "x": [
+    -1.296,
+    -1.241
+   ],
+   "y": [
+    2.615,
+    2.895
+   ]
+  },
+  {
+   "name": "RoomDressing/shelf_box_31",
+   "x": [
+    -1.237,
+    -0.979
+   ],
+   "y": [
+    2.595,
+    2.915
+   ]
+  },
+  {
+   "name": "RoomDressing/shelf_box_32",
+   "x": [
+    -0.897,
+    -0.624
+   ],
+   "y": [
+    2.595,
+    2.915
+   ]
+  },
+  {
+   "name": "RoomDressing/post_62",
+   "x": [
+    -0.795,
+    -0.765
+   ],
+   "y": [
+    -2.95,
+    -2.92
+   ]
+  },
+  {
+   "name": "RoomDressing/post_63",
+   "x": [
+    -0.795,
+    -0.765
+   ],
+   "y": [
+    -2.64,
+    -2.61
+   ]
+  },
+  {
+   "name": "RoomDressing/post_64",
+   "x": [
+    0.565,
+    0.595
+   ],
+   "y": [
+    -2.95,
+    -2.92
+   ]
+  },
+  {
+   "name": "RoomDressing/post_65",
+   "x": [
+    0.565,
+    0.595
+   ],
+   "y": [
+    -2.64,
+    -2.61
+   ]
+  },
+  {
+   "name": "RoomDressing/board_66",
+   "x": [
+    -0.8,
+    0.6
+   ],
+   "y": [
+    -2.955,
+    -2.605
+   ]
+  },
+  {
+   "name": "RoomDressing/book_67",
+   "x": [
+    -0.75,
+    -0.714
+   ],
+   "y": [
+    -2.903,
+    -2.657
+   ]
+  },
+  {
+   "name": "RoomDressing/book_68",
+   "x": [
+    -0.71,
+    -0.659
+   ],
+   "y": [
+    -2.903,
+    -2.657
+   ]
+  },
+  {
+   "name": "RoomDressing/book_69",
+   "x": [
+    -0.655,
+    -0.608
+   ],
+   "y": [
+    -2.903,
+    -2.657
+   ]
+  },
+  {
+   "name": "RoomDressing/shelf_box_70",
+   "x": [
+    -0.604,
+    -0.433
+   ],
+   "y": [
+    -2.92,
+    -2.64
+   ]
+  },
+  {
+   "name": "RoomDressing/book_71",
+   "x": [
+    -0.326,
+    -0.272
+   ],
+   "y": [
+    -2.903,
+    -2.657
+   ]
+  },
+  {
+   "name": "RoomDressing/shelf_box_72",
+   "x": [
+    -0.268,
+    -0.037
+   ],
+   "y": [
+    -2.92,
+    -2.64
+   ]
+  },
+  {
+   "name": "RoomDressing/book_73",
+   "x": [
+    -0.02,
+    0.044
+   ],
+   "y": [
+    -2.903,
+    -2.657
+   ]
+  },
+  {
+   "name": "RoomDressing/book_74",
+   "x": [
+    0.048,
+    0.088
+   ],
+   "y": [
+    -2.903,
+    -2.657
+   ]
+  },
+  {
+   "name": "RoomDressing/book_75",
+   "x": [
+    0.092,
+    0.137
+   ],
+   "y": [
+    -2.903,
+    -2.657
+   ]
+  },
+  {
+   "name": "RoomDressing/shelf_box_76",
+   "x": [
+    0.141,
+    0.369
+   ],
+   "y": [
+    -2.92,
+    -2.64
+   ]
+  },
+  {
+   "name": "RoomDressing/shelf_box_77",
+   "x": [
+    0.427,
+    0.662
+   ],
+   "y": [
+    -2.92,
+    -2.64
+   ]
+  },
+  {
+   "name": "RoomDressing/post_87",
+   "x": [
+    -2.95,
+    -2.92
+   ],
+   "y": [
+    0.805,
+    0.835
+   ]
+  },
+  {
+   "name": "RoomDressing/post_88",
+   "x": [
+    -2.61,
+    -2.58
+   ],
+   "y": [
+    0.805,
+    0.835
+   ]
+  },
+  {
+   "name": "RoomDressing/post_89",
+   "x": [
+    -2.95,
+    -2.92
+   ],
+   "y": [
+    2.265,
+    2.295
+   ]
+  },
+  {
+   "name": "RoomDressing/post_90",
+   "x": [
+    -2.61,
+    -2.58
+   ],
+   "y": [
+    2.265,
+    2.295
+   ]
+  },
+  {
+   "name": "RoomDressing/board_91",
+   "x": [
+    -2.955,
+    -2.575
+   ],
+   "y": [
+    0.8,
+    2.3
+   ]
+  },
+  {
+   "name": "RoomDressing/shelf_box_92",
+   "x": [
+    -2.917,
+    -2.613
+   ],
+   "y": [
+    0.85,
+    1.06
+   ]
+  },
+  {
+   "name": "RoomDressing/book_93",
+   "x": [
+    -2.898,
+    -2.632
+   ],
+   "y": [
+    1.143,
+    1.192
+   ]
+  },
+  {
+   "name": "RoomDressing/shelf_box_94",
+   "x": [
+    -2.917,
+    -2.613
+   ],
+   "y": [
+    1.196,
+    1.348
+   ]
+  },
+  {
+   "name": "RoomDressing/book_95",
+   "x": [
+    -2.898,
+    -2.632
+   ],
+   "y": [
+    1.406,
+    1.447
+   ]
+  },
+  {
+   "name": "RoomDressing/book_96",
+   "x": [
+    -2.898,
+    -2.632
+   ],
+   "y": [
+    1.451,
+    1.503
+   ]
+  },
+  {
+   "name": "RoomDressing/shelf_box_97",
+   "x": [
+    -2.917,
+    -2.613
+   ],
+   "y": [
+    1.507,
+    1.789
+   ]
+  },
+  {
+   "name": "RoomDressing/shelf_box_98",
+   "x": [
+    -2.917,
+    -2.613
+   ],
+   "y": [
+    1.868,
+    2.048
+   ]
+  },
+  {
+   "name": "RoomDressing/book_99",
+   "x": [
+    -2.898,
+    -2.632
+   ],
+   "y": [
+    2.139,
+    2.195
+   ]
+  },
+  {
+   "name": "RoomDressing/book_100",
+   "x": [
+    -2.898,
+    -2.632
+   ],
+   "y": [
+    2.199,
+    2.255
+   ]
+  },
+  {
+   "name": "RoomDressing/item_112",
+   "x": [
+    -0.35,
+    0.55
+   ],
+   "y": [
+    2.505,
+    2.955
+   ]
+  },
+  {
+   "name": "RoomDressing/item_113",
+   "x": [
+    0.75,
+    1.25
+   ],
+   "y": [
+    2.555,
+    2.955
+   ]
+  },
+  {
+   "name": "RoomDressing/item_115",
+   "x": [
+    1.5,
+    2.1
+   ],
+   "y": [
+    2.555,
+    2.955
+   ]
+  },
+  {
+   "name": "RoomDressing/item_116",
+   "x": [
+    2.3,
+    2.7
+   ],
+   "y": [
+    2.655,
+    2.955
+   ]
+  },
+  {
+   "name": "RoomDressing/item_117",
+   "x": [
+    -1.8,
+    -1.2
+   ],
+   "y": [
+    -2.955,
+    -2.555
+   ]
+  },
+  {
+   "name": "RoomDressing/item_119",
+   "x": [
+    0.875,
+    1.325
+   ],
+   "y": [
+    -2.955,
+    -2.555
+   ]
+  },
+  {
+   "name": "RoomDressing/item_120",
+   "x": [
+    -2.955,
+    -2.505
+   ],
+   "y": [
+    -1.4,
+    -0.6
+   ]
+  },
+  {
+   "name": "RoomDressing/item_121",
+   "x": [
+    -2.955,
+    -2.555
+   ],
+   "y": [
+    -0.05,
+    0.45
+   ]
+  },
+  {
+   "name": "RoomDressing/item_123",
+   "x": [
+    2.505,
+    2.955
+   ],
+   "y": [
+    -1.65,
+    -0.75
+   ]
+  },
+  {
+   "name": "RoomDressing/item_124",
+   "x": [
+    2.555,
+    2.955
+   ],
+   "y": [
+    -0.25,
+    0.25
+   ]
+  },
+  {
+   "name": "RoomDressing/item_126",
+   "x": [
+    2.505,
+    2.955
+   ],
+   "y": [
+    1.8,
+    2.4
+   ]
+  }
+ ]
+}

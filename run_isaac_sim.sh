@@ -3,6 +3,7 @@
 # ./run_sim_slam.sh in another terminal.
 #
 #   ./run_isaac_sim.sh [--headless] [--agent sim] [--usd FILE] [--no-realtime] [--plain-room] [--light N]
+#                      [--agents N] [--poses "x,y,yaw;..."] [--gt-log DIR]   (multi-robot: see run_ma_sim_test.sh)
 #
 # Uses ROS domain $SIM_DOMAIN (default 31) so the simulated robot never mixes
 # with real robots on the lab network; RViz and teleop need the same:

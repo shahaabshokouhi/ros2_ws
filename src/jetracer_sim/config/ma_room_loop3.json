@@ -1,0 +1,9 @@
+{
+  "name": "room_loop3",
+  "description": "Three cars on one counter-clockwise loop through the free band of the furnished 6 x 6 m room, a third of a lap apart (constant spacing, so they never meet; each later drives where the others started). 1.5 laps each.",
+  "agents": ["sim_1", "sim_2", "sim_3"],
+  "route": {"type": "rounded_rect", "xmin": -1.7, "xmax": 1.9, "ymin": -1.6, "ymax": 1.9, "radius": 0.6},
+  "start_fraction": [0.0, 0.3333, 0.6667],
+  "laps": 1.5,
+  "speed": 0.15
+}

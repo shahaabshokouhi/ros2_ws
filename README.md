@@ -52,6 +52,7 @@ need first.
 | Drive with a gamepad (no SLAM) | `./run_joystick.sh` | |
 | Follow Vicon waypoints | `./run_controller.sh` | |
 | Fix a wedged RealSense ("Frames didn't arrive") | `./reset_camera.sh` | |
+| Test several robots in simulation and score them against ground truth | — | `./run_ma_sim_test.sh` (report in `~/result/ma_sim/…`, see [below](#run_ma_sim_testsh--multi-robot-test-in-simulation-with-a-report-pc)) |
 | Test the whole stack in Isaac Sim | — | terminal 1 `./run_isaac_sim.sh`; terminal 2 `./run_sim_slam.sh --nav --teleop`; then `ROS_DOMAIN_ID=31 ./run_rviz.sh sim` and/or `ROS_DOMAIN_ID=31 ./run_teleop.sh sim` |
 | Evaluate the sharing method offline on recorded data | — | `~/ORB_SLAM3/eval/kf_sharing/run_replay.sh` ([its README](https://github.com/shahaabshokouhi/ORB_SLAM3/blob/master/eval/kf_sharing/README.md)) |
 
@@ -203,6 +204,9 @@ centre; N = +y, E = +x). `Perspective` is the free camera again.
 | `--light I` | 12000 | brightness of each of the 9 ceiling panels; with `--plain-room`: an even dome light (default 1000, 0 = none), without which the bare room is dark beyond ~1 m |
 | `--max-steer RAD` | 0.59 | steering limit (the real car: 0.6) |
 | `--width`, `--height` | 640, 480 | camera resolution (the ORB-SLAM3 settings assume 640×480) |
+| `--agents N` | 1 | number of cars; with more than one they are copies named `<agent>_1 … <agent>_N`, each with its own camera and topics (used by `run_ma_sim_test.sh`) |
+| `--poses "x,y,yaw;…"` | the scene's | start pose of each car (world frame, yaw in degrees) |
+| `--gt-log DIR` | off | write `DIR/<agent>_gt.csv`: every simulation step, each car's true base pose and camera pose (optical frame), with the wall time |
 
 ### `run_sim_slam.sh [options]` — the robot's stack on the simulated car (PC, terminal 2)
 
@@ -222,6 +226,60 @@ driver. Start `run_isaac_sim.sh` first.
 
 Then on the PC: `ROS_DOMAIN_ID=31 ./run_rviz.sh sim` and/or
 `ROS_DOMAIN_ID=31 ./run_teleop.sh sim`.
+
+### `run_ma_sim_test.sh` — multi-robot test in simulation, with a report (PC)
+
+```bash
+./run_ma_sim_test.sh [--spec FILE] [--method new|hq-mpshare] [--name NAME] [--gui] [--settle S] [--no-report]
+```
+
+One command runs a complete, repeatable multi-robot test and scores it against
+the simulator's ground truth (about 6 minutes for the default test):
+
+1. Isaac Sim starts with several JetRacers (default: three, `sim_1…sim_3`) at
+   their start poses in the furnished room, logging every car's true pose.
+2. Each car gets its own SLAM stack (`sim.launch.py`, the chosen method, the
+   occupancy grid), all in one ROS domain (31) so they share maps.
+3. `route_driver` drives every car along the spec's route with pure pursuit on
+   its TRUE pose, so every run drives exactly the same motion whatever SLAM
+   does. The default spec (`src/jetracer_sim/config/ma_room_loop3.json`) is one
+   13 m loop through the free band of the room, cars a third of a lap apart
+   (constant spacing, so they never meet), 1.5 laps at 0.15 m/s.
+4. After driving and `--settle` seconds (default 20) for sharing to finish,
+   the SLAM nodes are stopped with Ctrl-C, so each runs its final optimisation
+   and writes its keyframes and map points (`MA_NEW_EVAL_DIR`).
+5. `src/jetracer_sim/eval/ma_report.py` scores the run and writes the report.
+
+Every test writes a new folder, `~/result/ma_sim/<date>_<time>_<name>_<method>/` (or
+`$MA_RESULT_DIR/…`); earlier results are never overwritten. It holds:
+
+| Path | Content |
+|---|---|
+| `report.html`, `report.pdf` | the report: figures and tables below |
+| `metrics.json` | every number in the report |
+| `figures/` | route overview, path vs ground truth per robot, accuracy summary, alignment error over time, placement of received keyframes, each robot's map in 3D and from above (points and keyframes coloured by the robot they came from) |
+| `tables/` | per-keyframe, live-pose, alignment and placement errors (CSV) |
+| `raw/` | everything needed to re-score or analyse further: the spec, `gt/<robot>_gt.csv` (truth every step), `<robot>/eval/*.csv` (keyframes, map points with their origin robot, alignments, match verifications, timing, costs), `online/<robot>_online.csv` (the live SLAM pose), all logs, software versions (`env.txt`) |
+
+What is measured:
+
+* **Own path**, per robot: final keyframes **fitted** to the true camera path
+  (ATE, shape only); the same keyframes **anchored** at the first keyframe's
+  true pose (adds drift since the start); the **live** pose the robot drove on
+  (rear axle, 2D, fitted).
+* **Merging**, per host robot holding a peer's map: when the maps were first
+  aligned; every logged map-to-map transform against the TRUE one (from both
+  maps' first keyframes, so it does not inherit drift); where the peer's
+  keyframes land in the host's map against where the peer's camera truly was;
+  match verifications passed / tried; how many of the peer's points the host holds.
+
+Re-score a run (for example after changing the report): `~/venvs/env_isaaclab/bin/python
+src/jetracer_sim/eval/ma_report.py <run folder>` (Isaac's Python has the
+plotting libraries). A new test is a new spec file: robot names
+`<prefix>_1 … <prefix>_N`, a `route` (`rounded_rect` with `xmin`, `xmax`,
+`ymin`, `ymax`, `radius`), `start_fraction` per robot, `laps`, `speed`. Keep
+routes 0.3 m clear of `config/room_obstacles.json` (the furniture and props).
+Three robots use about 60 % of this PC's CPU and 80 % of its GPU.
 
 ### Other scripts
 
@@ -517,7 +575,7 @@ Config: `src/orb_slam3/config/nav2_jetracer.yaml`,
 | `src/orb_slam3/` | The ROS 2 node around the ORB-SLAM3 library (`src/orb_slam3_node.cpp`). Camera input, pose and map output, robot-to-robot messaging, keyframe dataset saving, evaluation logs. `src/occupancy_mapper.hpp`: grid, scans, navigation frames, safety gate. `launch/orb_slam3.launch.py`, `config/` (Nav2). |
 | `src/orbslam2_msgs/` | Messages shared by all robots (map points, keyframe adverts and data, ownership updates…). |
 | `src/jetracer/` | The car: motor/IMU driver `src/jetracer.cpp` (`/<agent>/cmd_vel` in, `odom`/`imu` out, stops after 1 s without commands); `scripts/teleop_keyboard.py` (`teleop`), `scripts/steer_calibration.py` (`steer_calibration`, how the car really turns), `teleop_joy.py`, `pid_controller.py` (Vicon waypoints), `display_node.py` (OLED), `odom_ekf.py`; `jetracer/jetson_monitor.py`; `config/waypoints.yaml`. |
-| `src/jetracer_sim/` | Isaac Sim stand-in: `isaac/run_isaac.py`, `isaac/room_dressing.py`, `isaac/views.py`, `jetracer_sim/cmd_vel_to_ackermann.py`, `launch/sim.launch.py`, `config/`. |
+| `src/jetracer_sim/` | Isaac Sim stand-in: `isaac/run_isaac.py` (one or several cars), `isaac/room_dressing.py`, `isaac/views.py`, `jetracer_sim/cmd_vel_to_ackermann.py`, `launch/sim.launch.py`, `config/` (camera settings, multi-robot test specs `ma_*.json`, `room_obstacles.json`). Multi-robot tests: `jetracer_sim/routes.py`, `jetracer_sim/route_driver.py`, `eval/ma_report.py` (run by `run_ma_sim_test.sh`). |
 | `src/orb_slam2/` | Legacy ORB-SLAM2 node. |
 | `robot_view.rviz` | RViz layout used by `run_rviz.sh` (`__AGENT__` is replaced). |
 
