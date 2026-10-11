@@ -3,7 +3,7 @@
   within ~1 m and treats unseen space as free.
 
   Replans only when the goal changes or the current path becomes blocked
-  (checked 3 times a second, so a newly seen obstacle triggers a new path
+  (checked 5 times a second, so a newly seen obstacle triggers a new path
   quickly). Re-running Hybrid-A* every second from a slightly different pose
   picked a different manoeuvre each time.
 
@@ -16,7 +16,7 @@
   <BehaviorTree ID="MainTree">
     <RecoveryNode number_of_retries="6" name="NavigateRecovery">
       <PipelineSequence name="NavigateWithReplanning">
-        <RateController hz="3.0">
+        <RateController hz="5.0">
           <Fallback>
             <ReactiveSequence>
               <Inverter>

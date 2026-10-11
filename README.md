@@ -428,12 +428,18 @@ Config: `src/orb_slam3/config/nav2_jetracer.yaml`,
 * **Unseen space counts as free.** The map covers ±10 m around the start from
   the beginning, so a goal anywhere in it is planned at once, straight through
   what hasn't been seen. The live scan and the grid mark obstacles. The path
-  is checked 3 times a second, and a blocked path is replanned.
+  is checked 5 times a second against the global costmap (updated 5 times a
+  second), and a blocked path is replanned: in the simulation a box appearing
+  50 cm ahead gets a path around it within 0.4 s.
 * **The live scan in the costmaps** marks obstacles up to 0.95 m and clears
   free space up to 1 m. The scan reports "free to 1 m" as +inf, which Nav2
   turns into a point just inside 1 m; marking up to the full 1 m made every
   free direction an obstacle, and after a turn the car sat in a closed ring
-  of them (fixed 2026-10-10).
+  of them (fixed 2026-10-10). Both obstacle layers also need the layer-wide
+  `min_obstacle_height: -1.0` (Nav2's default is 0): the scan lies at height
+  0, and when SLAM put the car a hair below the floor every scan point was
+  dropped as "too low", so the car reacted to obstacles only seconds later,
+  through the slower grid (fixed 2026-10-10).
 * **Recoveries:** back up 25 cm, then wait. They never clear the costmaps:
   with a 1 m sensor that made the car forget an obstacle it could no longer
   see up close. There's no spin.
@@ -530,6 +536,7 @@ not tracked.
 | Nav2 prints `Timed out waiting for transform … odom` | Normal for the first seconds (floor calibration). If it persists, check the line above. |
 | Car stops during navigation, log says `[nav] no SLAM pose …` | Tracking lost: the safety gate stopped the car and cancelled the goal. Back it away with teleop until SLAM relocalizes, then give the goal again. |
 | A goal does nothing: no blue path, no movement | Nav2 isn't active: `Managed nodes are active` never appeared. Look near the top of the log: `lifecycle_manager: error while loading shared libraries: libdiagnostic_updater.so` → `sudo apt install ros-humble-diagnostic-updater`; `package 'nav2_…' not found` → install Nav2 ([§2](#2-one-time-setup)); endless `Timed out waiting for transform … odom` → floor not calibrated. |
+| The car reacts late to obstacles (the pink cells appear only seconds after the camera sees the object) | The costmaps were dropping the live scan; fixed 2026-10-10 (`min_obstacle_height`), pull. To check: the **Live scan** dots in RViz show the object, and the local costmap should turn pink there within half a second. |
 | `GridBased: failed to create plan, exceeded maximum iterations` | The planner sees no way to the goal: the goal is inside an obstacle, or obstacles close it off. Look at the pink cells in RViz around the car and the goal. (A ring of fake obstacles around the car caused this until 2026-10-10: pull.) |
 | `Failed to make progress`, and the car keeps backing up a little | Something else is publishing on `/<agent>/cmd_vel` and cancelling Nav2's commands. Until 2026-10-10 the keyboard teleop sent "stop" 20 times a second even when idle: pull and rebuild `jetracer` on the PC. Also check that `run_joystick.sh` / `run_controller.sh` aren't running. |
 | `run_slam3.sh --nav` refuses to start | `run_joystick.sh` / `run_controller.sh` is running and publishes its own robot pose. Stop it, or use `--nav-wheels`. |
