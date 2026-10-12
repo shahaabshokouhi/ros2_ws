@@ -2,7 +2,7 @@
 # Isaac Sim stand-in for one JetRacer (jetracer_sim). Start this first, then
 # ./run_sim_slam.sh in another terminal.
 #
-#   ./run_isaac_sim.sh [--headless] [--agent sim] [--usd FILE] [--no-realtime] [--plain-room] [--light N]
+#   ./run_isaac_sim.sh [--headless] [--view Top] [--agent sim] [--usd FILE] [--no-realtime] [--plain-room] [--light N]
 #                      [--agents N] [--poses "x,y,yaw;..."] [--gt-log DIR]   (multi-robot: see run_ma_sim_test.sh)
 #
 # Uses ROS domain $SIM_DOMAIN (default 31) so the simulated robot never mixes

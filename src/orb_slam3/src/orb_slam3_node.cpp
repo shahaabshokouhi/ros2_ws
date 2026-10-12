@@ -31,6 +31,7 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include "ImuTypes.h"
 #include <std_msgs/msg/float64_multi_array.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/multi_array_dimension.hpp>
 
 #include <orbslam2_msgs/msg/map_point.hpp>
@@ -242,6 +243,10 @@ public:
             //     agent_name_ + "/orb_slam3/image_plane", 10);
             slam_metrics_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>(
                 agent_name_ + "/orb_slam3/slam_metrics", 10);
+            // Graph links per peer ("sim_2:12 sim_3:4": fused inter-agent
+            // measurements behind each peer's alignment), every 2 s.
+            ma_links_pub_ = this->create_publisher<std_msgs::msg::String>(
+                agent_name_ + "/orb_slam3/ma_links", 10);
             path_msg_.header.frame_id = map_frame_;
 
             // Tracking (image sync) gets its own callback group so it can be
@@ -617,14 +622,38 @@ private:
         // Publish SLAM-internal metrics for the scheduler.
         // Indices: 0=track_ms, 1=tracking_state, 2=map_points,
         //          3=hq_map_points, 4=import_queue_depth,
-        //          5=published_total, 6=imported_total
+        //          5=published_total, 6=imported_total,
+        //          7=frame_lag_ms (wall clock now - image stamp),
+        //          8=lm_queue (keyframes waiting for LocalMapping),
+        //          9=ma_cycle_ms (how long the multi-agent manager's last cycle worked),
+        //          10=dist_since_correction_m (camera path since the map was last
+        //             corrected: loop closure / merge / global BA, or a new
+        //             inter-agent link), 11=corrections (main map's big-change count),
+        //          12=inter_links (fused inter-agent measurements, all peers),
+        //          13=aligned_peers. Indices 0-6 never move.
         {
+            if (trackingOk) {
+                const Eigen::Vector3f c = Tcw.inverse().translation();
+                if (have_center_) dist_since_corr_ += (c - last_center_).norm();
+                last_center_ = c;
+                have_center_ = true;
+            }
+            int big_change = 0, links = 0, peers = 0;
+            if (slam_ && slam_->GetMainMap()) big_change = slam_->GetMainMap()->GetLastBigChangeIdx();
+            if (slam_ && slam_->mpMA)
+                for (const auto& pr : slam_->mpMA->AlignedPeers()) { links += pr.second; ++peers; }
+            if (big_change != last_big_change_ || links > last_links_) dist_since_corr_ = 0.0;
+            last_big_change_ = big_change;
+            last_links_ = links;
+
             std_msgs::msg::Float64MultiArray m;
             std_msgs::msg::MultiArrayDimension dim;
             dim.label  = "track_ms,tracking_state,map_points,hq_map_points,"
-                         "import_queue_depth,published_total,imported_total";
-            dim.size   = 7;
-            dim.stride = 7;
+                         "import_queue_depth,published_total,imported_total,"
+                         "frame_lag_ms,lm_queue,ma_cycle_ms,dist_since_correction_m,"
+                         "corrections,inter_links,aligned_peers";
+            dim.size   = 14;
+            dim.stride = 14;
             m.layout.dim.push_back(dim);
 
             int tracking_state = slam_ ? static_cast<int>(slam_->GetTrackingState()) : -1;
@@ -647,6 +676,13 @@ private:
                 static_cast<double>(q_depth),
                 static_cast<double>(publishedCount_.load()),
                 static_cast<double>(importedCount_.load()),
+                (this->now().seconds() - timestamp) * 1000.0,
+                static_cast<double>(slam_ && slam_->mpMA ? slam_->mpMA->LocalMappingQueue() : -1),
+                slam_ && slam_->mpMA ? slam_->mpMA->LastCycleMs() : 0.0,
+                dist_since_corr_,
+                static_cast<double>(big_change),
+                static_cast<double>(links),
+                static_cast<double>(peers),
             };
             slam_metrics_pub_->publish(m);
 
@@ -748,6 +784,12 @@ private:
         // Coordinate change matrix C maps ORB→ROS:
         //   x_ros =  z_orb,  y_ros = -x_orb,  z_ros = -y_orb
         // R_ros = C * R_orb * C^T,  t_ros = C * t_orb
+        {
+            std_msgs::msg::String lm;
+            for (const auto& pr : slam_->mpMA->AlignedPeers())
+                lm.data += (lm.data.empty() ? "" : " ") + pr.first + ":" + std::to_string(pr.second);
+            ma_links_pub_->publish(lm);
+        }
         auto tfs = slam_->mpMA->GetCurrentTransforms();
         auto now = this->get_clock()->now();
         for (const auto& [other_name, R_orb, t_orb] : tfs) {
@@ -1627,6 +1669,11 @@ private:
     std::atomic<uint64_t> receivedCount_{0};
     std::atomic<uint64_t> importedCount_{0};
     double last_track_ms_ = 0.0;
+    // slam_metrics 10-12: path since the last map correction (see the publisher)
+    Eigen::Vector3f last_center_ = Eigen::Vector3f::Zero();
+    bool   have_center_ = false;
+    double dist_since_corr_ = 0.0;
+    int    last_big_change_ = 0, last_links_ = 0;
     std::ofstream frames_out_;   // evaluation only: frames.csv
     int frames_since_flush_ = 0;
 
@@ -1747,6 +1794,7 @@ private:
     // rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr image_plane_pub_;
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr slam_metrics_pub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr ma_links_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr hq_pointcloud_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr merged_map_pub_;

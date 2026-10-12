@@ -3,7 +3,7 @@
 
 Run with Isaac Sim's Python (../run_isaac_sim.sh does that):
 
-    python run_isaac.py [--usd FILE] [--agent sim] [--headless] [--no-realtime] [--plain-room]
+    python run_isaac.py [--usd FILE] [--agent sim] [--headless] [--view Top] [--no-realtime] [--plain-room]
                         [--agents N] [--poses "x,y,yaw;..."] [--gt-log DIR]
 
 Opens the JetRacer scene (Ackermann car with a RealSense D455 in a room),
@@ -48,6 +48,8 @@ ap.add_argument('--poses', default='',
                 help='start poses "x,y,yaw_deg;..." (world frame), one per car')
 ap.add_argument('--gt-log', default='', help='directory for <agent>_gt.csv ground-truth logs')
 ap.add_argument('--headless', action='store_true')
+ap.add_argument('--view', default='Corner_SW', choices=['Top', 'Corner_NE', 'Corner_NW', 'Corner_SW', 'Corner_SE'],
+                help='viewing camera the window starts with (others: viewport camera menu)')
 ap.add_argument('--no-realtime', action='store_true', help='run as fast as possible')
 ap.add_argument('--width', type=int, default=640)
 ap.add_argument('--height', type=int, default=480)
@@ -231,7 +233,7 @@ import views  # noqa: E402
 view_paths = views.add_views(stage)
 if not args.headless:
     from omni.kit.viewport.utility import get_active_viewport  # noqa: E402
-    get_active_viewport().camera_path = view_paths[3]   # Corner_SW: behind the car's start
+    get_active_viewport().camera_path = next(p for p in view_paths if p.endswith('/' + args.view))
 print('[jetracer_sim] views (viewport camera menu): ' + ', '.join(p.split('/')[-1] for p in view_paths), flush=True)
 
 
