@@ -1,4 +1,4 @@
-# Copied from ma_explore (5e2aa14) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (3605e76) by scripts/sync_robot_package.sh: edit it there, not here.
 """Back-tracking after a SLAM tracking loss (pure geometry, no ROS).
 
 When tracking is lost the car drives back, slowly and in reverse, along the

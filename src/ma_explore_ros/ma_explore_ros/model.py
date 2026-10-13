@@ -1,4 +1,4 @@
-# Copied from ma_explore (5e2aa14) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (3605e76) by scripts/sync_robot_package.sh: edit it there, not here.
 """Actor (decentralized: one robot's own observation) and critic (centralized:
 global state, used in training only).
 

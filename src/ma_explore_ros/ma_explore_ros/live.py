@@ -1,4 +1,4 @@
-# Copied from ma_explore (5e2aa14) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (3605e76) by scripts/sync_robot_package.sh: edit it there, not here.
 """Decisions from live maps: the bridge between a running robot and the policy.
 
 No ROS here, so it can be tested on its own. A robot's planner (ros_planner.py)

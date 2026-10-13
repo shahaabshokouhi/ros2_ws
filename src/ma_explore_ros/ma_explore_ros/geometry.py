@@ -1,4 +1,4 @@
-# Copied from ma_explore (5e2aa14) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (3605e76) by scripts/sync_robot_package.sh: edit it there, not here.
 """Batched grid geometry on the GPU: sensing, path distances, frontiers, candidate goals.
 
 Everything works on stacks of maps (first dimension = robot in some

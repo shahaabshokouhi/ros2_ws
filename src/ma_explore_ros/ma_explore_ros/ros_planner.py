@@ -1,4 +1,4 @@
-# Copied from ma_explore (5e2aa14) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (3605e76) by scripts/sync_robot_package.sh: edit it there, not here.
 """ROS 2 planner for one robot: picks its next exploration goal and sends it to Nav2.
 
     python -m ma_explore.ros_planner --ros-args -p agent:=sim_1 -p agents:="sim_1 sim_2 sim_3" \\
@@ -88,7 +88,6 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, Float64MultiArray, String
 from tf2_ros import Buffer, TransformListener
 
-from . import baselines
 from .live import Decider, Grid, Robot, load_policy
 from .recovery import BackTrack
 
@@ -179,7 +178,8 @@ class Planner(Node):
         # need it on the full stack (else they pick frontier cells by walls that Nav2 cannot reach);
         # -1 = auto: 0.25 m for baselines, off for a trained policy (as in training; 0 failed goals in Isaac)
         gc = p('goal_clearance', -1.0)
-        gc = (0.0 if policy.startswith('rl:') else 0.25) if gc < 0 else gc
+        learned = policy.startswith('rl:') or policy.endswith('.pt')     # on the robots: a plain policy file
+        gc = (0.0 if learned else 0.25) if gc < 0 else gc
         self.decider = Decider(pol, env_cfg, self.team, H, device, goal_clearance=math.ceil(round(gc / 0.1, 6)))
         self.policy_name = policy
         # warm up (the first call compiles the path-distance kernel)
@@ -243,7 +243,6 @@ class Planner(Node):
         self.trail = []
         self.t_decisions = 0
         self.last_xy, self.last_t, self.next_ok = None, 0.0, 0.0
-        self.idle_n = 0
         os.makedirs(out, exist_ok=True)
         self.out = out
         self.ready = False
@@ -258,7 +257,10 @@ class Planner(Node):
                            'n_candidates', 'merged_with', 'decide_ms', 'reason', 'goal_yaw', 'kind', 'mate'])
         self.create_timer(0.5, self.tick)
         self.create_timer(0.1, self.recovery_tick)
-        self.get_logger().info(f'{self.me}: planner "{policy}" on {device}, team {self.agents}')
+        self.get_logger().info(f'{self.me}: planner "{policy}" ({"learned" if learned else "rule-based"}) on {device}, '
+                               f'team {self.agents}; goal stand-off {self.decider.cfg.goal_standoff * 0.1:.1f} m, '
+                               f'goal clearance {self.decider.goal_clearance * 0.1:.1f} m, escape radius '
+                               f'{self.decider.env.escape_cells * 0.1:.1f} m, recovery {self.rec_mode if self.rec_on else "off"}')
 
     @staticmethod
     def revisit_first(pol, cfg):
@@ -527,22 +529,6 @@ class Planner(Node):
             res = self.decider.decide(robots, self.trail, self.t_decisions, tick=self.tick_now(),
                                       blocked=[(b[0], b[1], b[3]) for b in self.blocked if b[4] != "reached"])
             n_goals = res['n_candidates'] - (1 if self.decider.env.n_fixed() == 2 else 0)
-        idle = res['goal'] is None and self.goal is None            # standing without a goal (WAIT or keep)
-        self.idle_n = self.idle_n + 1 if (idle and n_goals > 0) else 0
-        learned = self.policy_name.startswith('rl:') or self.policy_name.endswith('.pt')
-        if learned and self.idle_n >= 3:
-            # a policy idling while there are goals (seen with policies trained before stand-off goals): take
-            # the coordinated rule's goal once
-            pol = self.decider.policy
-            self.decider.policy = baselines.coordinated
-            try:
-                res = self.decider.decide(robots, self.trail, self.t_decisions, tick=self.tick_now(),
-                                          blocked=[(b[0], b[1], b[3]) for b in self.blocked])
-            finally:
-                self.decider.policy = pol
-            self.get_logger().info(f'{self.me}: idle for {self.idle_n} decisions with goals offered: '
-                                   f'taking the coordinated rule\'s goal')
-            self.idle_n = 0
         self.t_decisions += 1
         self.last_xy, self.last_t = self.pose[self.me][:2], now
         if n_goals <= 0:
