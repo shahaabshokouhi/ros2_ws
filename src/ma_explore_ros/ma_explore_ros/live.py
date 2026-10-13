@@ -1,4 +1,4 @@
-# Copied from ma_explore (2f60eaf) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (5e2aa14) by scripts/sync_robot_package.sh: edit it there, not here.
 """Decisions from live maps: the bridge between a running robot and the policy.
 
 No ROS here, so it can be tested on its own. A robot's planner (ros_planner.py)
@@ -144,12 +144,13 @@ def load_policy(name, device='cpu', env_config=''):
 class Decider:
     """Builds the training observation from live maps and asks the policy."""
 
-    def __init__(self, policy, env_cfg, n_agents, H=96, device='cpu', clear_cells=2, goal_clearance=0):
+    def __init__(self, policy, env_cfg, n_agents, H=96, device='cpu', clear_cells=2, goal_clearance=0, escape_cells=4):
         self.policy, self.H, self.dev = policy, H, torch.device(device)
         self.clear_cells = clear_cells        # cells around each robot that cannot be obstacles (0.2 m)
         self.goal_clearance = goal_clearance  # cells: new goals at least this far from known obstacles (0: off)
         self.cfg = EnvConfig(**{**env_cfg.__dict__, 'n_agents': n_agents})
         self.env = ExploreEnv(np.zeros((1, H, H), np.uint8), 1, self.cfg, device)
+        self.env.escape_cells = escape_cells  # cells around the robot passable unless occupied (a tight spot)
         self.N = n_agents
 
     @torch.no_grad()
@@ -243,11 +244,12 @@ class Decider:
             bad = near[cc[:, 0], cc[:, 1]]
             bad[:e.n_fixed()] = False
             obs['cand_mask'][0, 0] &= ~bad
-        if len(blocked):
+        if len(blocked):           # (x, y) or (x, y, radius): goals Nav2 reached or could not reach, for a while
             xy = torch.as_tensor(win.to_xy(obs['cand_cells'][0, 0].cpu().numpy()), device=d, dtype=torch.float32)
-            b = torch.as_tensor(np.asarray(blocked, np.float32), device=d)
-            near = torch.cdist(xy, b).amin(1) < block_radius
-            near[0] = False                                   # "keep" stays possible
+            bl = np.array([(b[0], b[1], b[2] if len(b) > 2 else block_radius) for b in blocked], np.float32)
+            b = torch.as_tensor(bl, device=d)
+            near = (torch.cdist(xy, b[:, :2]) < b[None, :, 2]).any(1)
+            near[:e.n_fixed()] = False                        # keep and WAIT stay possible
             obs['cand_mask'][0, 0] &= ~near
         a = int(self.policy(obs)[0, 0])
         cand = obs['cand_cells'][0, 0].cpu().numpy()

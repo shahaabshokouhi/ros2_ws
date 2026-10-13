@@ -1,4 +1,4 @@
-# Copied from ma_explore (2f60eaf) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (5e2aa14) by scripts/sync_robot_package.sh: edit it there, not here.
 """ROS 2 planner for one robot: picks its next exploration goal and sends it to Nav2.
 
     python -m ma_explore.ros_planner --ros-args -p agent:=sim_1 -p agents:="sim_1 sim_2 sim_3" \\
@@ -88,6 +88,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, Float64MultiArray, String
 from tf2_ros import Buffer, TransformListener
 
+from . import baselines
 from .live import Decider, Grid, Robot, load_policy
 from .recovery import BackTrack
 
@@ -145,6 +146,10 @@ class Planner(Node):
         self.rec_back = p('recovery_back_m', 0.8)        # m backed up per attempt
         self.rec_speed = p('recovery_speed', 0.1)        # m/s
         self.rec_tries = p('recovery_attempts', 2)
+        # straight: reverse straight back (wheel odometry measures the distance; timed without it): the
+        # usual loss is an obstacle suddenly filling the camera (real robot, 13 October). path: follow
+        # the path driven before the loss backwards (needs wheel odometry consistent with SLAM).
+        self.rec_mode = p('recovery_mode', 'straight')
         self.rec_test_at = p('recovery_test_at', -1.0)   # testing: pretend a loss this many s after the start
         # close enough: a car within near_dist m of its goal for near_s s counts as there, even if Nav2 is
         # still manoeuvring to match the goal heading (a car cannot turn on the spot; Isaac, 13 October)
@@ -234,10 +239,11 @@ class Planner(Node):
         self.goal_yaw = None          # heading at a revisit pose, else None
         self.goal_handle = None
         self.goal_seq = 0
-        self.blocked = []             # [(x, y, until)]
+        self.blocked = []             # [(x, y, until, radius, why)]: goals reached (0.15 m) or failed (0.3 m)
         self.trail = []
         self.t_decisions = 0
         self.last_xy, self.last_t, self.next_ok = None, 0.0, 0.0
+        self.idle_n = 0
         os.makedirs(out, exist_ok=True)
         self.out = out
         self.ready = False
@@ -482,7 +488,7 @@ class Planner(Node):
             if now - self.near_since > self.near_s:
                 self.get_logger().info(f'{self.me}: at ({self.goal[0]:.2f}, {self.goal[1]:.2f}) within '
                                        f'{math.dist(xy, self.goal):.2f} m for {self.near_s:.0f} s: counted as reached')
-                self.blocked.append((self.goal[0], self.goal[1], now + self.block_time))
+                self.blocked.append((self.goal[0], self.goal[1], now + self.block_time, 0.15, 'reached'))
                 if self.goal_handle is not None:
                     self.goal_seq += 1                      # the cancel must not look like a failure
                     self.goal_handle.cancel_goal_async()
@@ -513,12 +519,43 @@ class Planner(Node):
         robots = [self.robot(self.me)] + [self.robot(a) for a in self.others]
         robots += [Robot(known=False)] * (self.team - len(robots))
         res = self.decider.decide(robots, self.trail, self.t_decisions,
-                                  blocked=[b[:2] for b in self.blocked], tick=self.tick_now())
+                                  blocked=[(b[0], b[1], b[3]) for b in self.blocked], tick=self.tick_now())
+        n_goals = res['n_candidates'] - (1 if self.decider.env.n_fixed() == 2 else 0)
+        if n_goals <= 0 and any(b[4] == 'reached' for b in self.blocked):
+            # only goals near ones just reached are left: offer them again rather than stand still
+            # (stand-off goals are often near where the car is; real robot, 13 October)
+            res = self.decider.decide(robots, self.trail, self.t_decisions, tick=self.tick_now(),
+                                      blocked=[(b[0], b[1], b[3]) for b in self.blocked if b[4] != "reached"])
+            n_goals = res['n_candidates'] - (1 if self.decider.env.n_fixed() == 2 else 0)
+        idle = res['goal'] is None and self.goal is None            # standing without a goal (WAIT or keep)
+        self.idle_n = self.idle_n + 1 if (idle and n_goals > 0) else 0
+        learned = self.policy_name.startswith('rl:') or self.policy_name.endswith('.pt')
+        if learned and self.idle_n >= 3:
+            # a policy idling while there are goals (seen with policies trained before stand-off goals): take
+            # the coordinated rule's goal once
+            pol = self.decider.policy
+            self.decider.policy = baselines.coordinated
+            try:
+                res = self.decider.decide(robots, self.trail, self.t_decisions, tick=self.tick_now(),
+                                          blocked=[(b[0], b[1], b[3]) for b in self.blocked])
+            finally:
+                self.decider.policy = pol
+            self.get_logger().info(f'{self.me}: idle for {self.idle_n} decisions with goals offered: '
+                                   f'taking the coordinated rule\'s goal')
+            self.idle_n = 0
         self.t_decisions += 1
         self.last_xy, self.last_t = self.pose[self.me][:2], now
-        n_goals = res['n_candidates'] - (1 if self.decider.env.n_fixed() == 2 else 0)
         if n_goals <= 0:
-            self.get_logger().info(f'{self.me}: decision {self.t_decisions}: no reachable goal on the map')
+            self.get_logger().info(f'{self.me}: decision {self.t_decisions}: no reachable goal on the map '
+                                   f'({res["n_candidates"]} slots valid, {len(self.blocked)} goals blocked)')
+            if not getattr(self, 'stall_saved', False):    # the map it saw, to replay the stall offline
+                self.stall_saved = True
+                np.savez_compressed(os.path.join(self.out, f'{self.me}_stall_{self.t_decisions}.npz'),
+                                    planes=res['obs']['planes'][0, 0].cpu().numpy(), pose=np.array(self.pose[self.me]),
+                                    window=np.array([res['window'].x0, res['window'].y0, res['window'].cell]),
+                                    blocked=np.array([(b[0], b[1], b[3]) for b in self.blocked]).reshape(-1, 3))
+        else:
+            self.stall_saved = False
         x, y, yaw = self.pose[self.me]
         merged = [a for a, r in zip(self.others, robots[1:]) if r.known]
         self.publish_known(res)
@@ -589,38 +626,57 @@ class Planner(Node):
                 self.get_logger().warn(f'{self.me}: tracking still lost after {r["tries"]} back-ups: '
                                        'needs help (drive it back with the keyboard)')
                 return
-            bt = self.backtrack(r, (r['tries'] + 1) * self.rec_back)
-            if bt is None:
-                r['stage'] = 'none'
-                self.get_logger().warn(f'{self.me}: cannot back up (no wheel odometry on /{self.me}/odom, '
-                                       'or no path driven): waiting for tracking')
-                return
-            r.update(stage='drive', bt=bt, tries=r['tries'] + 1, t=now, check=(now, self.wheel_hist[-1][1:3]))
+            wheel_ok = bool(self.wheel_hist) and now - self.wheel_hist[-1][0] < 0.5
+            bt = None
+            if self.rec_mode == 'path':
+                bt = self.backtrack(r, (r['tries'] + 1) * self.rec_back)
+                if bt is None:
+                    self.get_logger().warn(f'{self.me}: cannot follow the path back (no wheel odometry on '
+                                           f'/{self.me}/odom, or no path driven): backing up straight')
+            r.update(stage='drive', bt=bt, tries=r['tries'] + 1, t=now, t_drive=now,
+                     start=self.wheel_hist[-1][1:3] if wheel_ok else None,
+                     check=(now, self.wheel_hist[-1][1:3] if wheel_ok else None))
             self.slam_event('recovery_start', now - r['t_lost'])
-            self.get_logger().info(f'{self.me}: backing up along the last {bt.length:.2f} m driven '
-                                   f'(attempt {r["tries"]})')
+            self.get_logger().info(f'{self.me}: backing up {"along the last %.2f m driven" % bt.length if bt else "straight %.2f m" % self.rec_back}'
+                                   f' at {self.rec_speed:.2f} m/s (attempt {r["tries"]}; wheel odometry '
+                                   f'{"yes" if wheel_ok else "no: timed"})')
         if r['stage'] == 'drive':
-            w = self.wheel_hist[-1]
-            if now - w[0] > 0.5:                          # no wheel odometry: do not drive blind
-                self.stop_car()
-                r['stage'] = 'none'
-                return
-            v, wz, done = r['bt'].command(w[1:])
+            w = self.wheel_hist[-1] if self.wheel_hist else None
+            wheel_ok = w is not None and now - w[0] < 0.5
+            if r['bt'] is not None:
+                if not wheel_ok:
+                    self.stop_car()
+                    r.update(stage='pause', t=now)
+                    self.get_logger().warn(f'{self.me}: back-up stopped: wheel odometry stopped')
+                    return
+                v, wz, done = r['bt'].command(w[1:])
+                why = 'end of the path' if done else ''
+            else:                                         # straight back
+                v, wz = -self.rec_speed, 0.0
+                dist = math.dist(r['start'], w[1:3]) if (wheel_ok and r['start'] is not None) else None
+                done = (dist is not None and dist >= self.rec_back) or \
+                       (now - r['t_drive'] >= 1.5 * self.rec_back / max(self.rec_speed, 1e-3))
+                why = f'{dist:.2f} m by wheel odometry' if dist is not None else 'time up'
             if done:
                 self.stop_car()
-                r['driven'] += r['bt'].driven
+                d_ = r['bt'].driven if r['bt'] is not None else (math.dist(r['start'], w[1:3]) if (wheel_ok and r['start']) else 0.0)
+                r['driven'] += d_
                 r.update(stage='pause', t=now)
+                self.get_logger().info(f'{self.me}: back-up done ({why}); waiting {self.rec_wait:.0f} s for tracking')
                 if self.test_lost:                        # test: the back-up itself is what is tested
                     self.test_lost = False
                 return
             t0, xy0 = r['check']
-            if now - t0 > 3.0:                            # not moving although commanded: blocked
+            if now - t0 > 3.0 and xy0 is not None and wheel_ok:   # not moving although commanded
                 if math.dist(xy0, w[1:3]) < 0.03:
-                    self.stop_car()
-                    r['driven'] += r['bt'].driven
-                    r.update(stage='pause', t=now, tries=self.rec_tries)
-                    self.get_logger().warn(f'{self.me}: backing up is blocked; stopping')
-                    return
+                    if r['bt'] is not None:                       # path mode relies on the wheels: stop
+                        self.stop_car()
+                        r['driven'] += r['bt'].driven
+                        r.update(stage='pause', t=now, tries=self.rec_tries)
+                        self.get_logger().warn(f'{self.me}: backing up is blocked; stopping')
+                        return
+                    self.get_logger().warn(f'{self.me}: wheel odometry shows no motion while backing up '
+                                           '(blocked, or odometry not updating); going on by time')
                 r['check'] = (now, w[1:3])
             cmd = Twist()
             cmd.linear.x, cmd.angular.z = float(v), float(wz)
@@ -738,7 +794,7 @@ class Planner(Node):
             if st == GoalStatus.STATUS_SUCCEEDED:
                 # A reached goal is not offered again for a while: with a forward camera a
                 # frontier the car stands on can stay a frontier (training's sensor saw all around).
-                self.blocked.append((goal[0], goal[1], time.monotonic() + self.block_time))
+                self.blocked.append((goal[0], goal[1], time.monotonic() + self.block_time, 0.15, 'reached'))
                 x, y, yaw = self.pose[self.me]
                 msg = f'{self.me}: reached ({goal[0]:.2f}, {goal[1]:.2f}) at {math.dist((x, y), goal):.2f} m'
                 if self.goal_yaw is not None:
@@ -750,7 +806,7 @@ class Planner(Node):
 
     def fail(self, goal, why):
         self.get_logger().info(f'{self.me}: goal ({goal[0]:.2f}, {goal[1]:.2f}) {why}; blocked for {self.block_time:.0f} s')
-        self.blocked.append((goal[0], goal[1], time.monotonic() + self.block_time))
+        self.blocked.append((goal[0], goal[1], time.monotonic() + self.block_time, 0.3, 'failed'))
         self.goal = None
         self.publish_goal()
 

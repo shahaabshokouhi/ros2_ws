@@ -1,4 +1,4 @@
-# Copied from ma_explore (2f60eaf) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (5e2aa14) by scripts/sync_robot_package.sh: edit it there, not here.
 """Batched multi-robot exploration environment on the GPU.
 
 B environments x N robots step together. Each robot has its OWN map (what it
@@ -306,6 +306,7 @@ class ExploreEnv:
         self.cand_yaw = torch.full((B, N, K), float('nan'), device=d)       # target heading (revisit poses)
         self.cand_mate = torch.full((B, N, K), -1, dtype=torch.long, device=d)  # whose pose (revisit poses)
         self.view_yaw = torch.full((B, N), float('nan'), device=d)       # heading to take at a viewpoint goal
+        self.escape_cells = 0      # live only (Decider): free cells this near the robot count as passable
         if self.poses:
             self.trail_tick = torch.full((B, N, H, W), -1, dtype=torch.int32, device=d)   # last visit
             self.trail_head = torch.zeros(B, N, H, W, device=d)                           # heading then
@@ -998,7 +999,13 @@ class ExploreEnv:
         src = torch.zeros(B * N, H, W, dtype=torch.bool, device=d)
         p = self.pos.view(-1, 2)
         src[torch.arange(B * N, device=d), p[:, 0], p[:, 1]] = True
-        Dr = G.distance_field((stand_known | unknown).view(-1, H, W), src).view(B, N, H, W)
+        passable = stand_known | unknown
+        if self.escape_cells:
+            # live maps: a tight spot (obstacles grown by `inflate` closing every way out) must not wall the
+            # robot in; near it, any cell not occupied counts (Nav2 checks the real collisions)
+            near = G.inflate(src, self.escape_cells).view(B, N, H, W)
+            passable = passable | (near & ~occ)
+        Dr = G.distance_field(passable.view(-1, H, W), src).view(B, N, H, W)
         mate = self.merged & ~torch.eye(N, dtype=torch.bool, device=d)              # (B, N, N) i knows j
         n_fixed = self.n_fixed()
         n_rev = c.n_revisit if c.slam_model else 0
@@ -1066,6 +1073,8 @@ class ExploreEnv:
             self.cand_stood[..., -nfr:], self.cand_front[..., -nfr:, :] = vyaw
         self.cand_mask = torch.cat([torch.ones(B, N, n_fixed, dtype=torch.bool, device=d)]
                                    + ([rok] if n_rev else []) + ([ook] if n_own else []) + [ok], 2)
+        if n_fixed == 2:          # with a WAIT action, "keep" without a goal (= stand still) is WAIT's job
+            self.cand_mask[..., 0] &= self.has_goal
         K = c.n_candidates
         # the heading a robot arrives with: the direction of the last step of its shortest path to the goal
         # (the live planner gives it to Nav2, so the car does not turn on the spot at a goal)
