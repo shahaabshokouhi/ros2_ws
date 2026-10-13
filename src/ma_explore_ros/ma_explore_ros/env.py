@@ -1,4 +1,4 @@
-# Copied from ma_explore (3605e76) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (3d9354e) by scripts/sync_robot_package.sh: edit it there, not here.
 """Batched multi-robot exploration environment on the GPU.
 
 B environments x N robots step together. Each robot has its OWN map (what it
@@ -17,11 +17,17 @@ then the robots drive `ticks` cells along shortest paths on the true map (the
 stand-in for Nav2), sensing after every cell. Robots that reach their goal wait
 for the next decision.
 
-Reward (shared by the team) per step:
+Reward per step, one per robot (shape B x N):
     w_team * gain in team coverage (union of all robots' own maps)
   + w_know * gain in mean integrated-map coverage (knowledge spread by merging)
-  - time_cost, + success_bonus when team coverage reaches `success` (episode ends).
-Coverage = fraction of the map's free cells seen.
+  - time_cost, + success_bonus when team coverage reaches `success` (episode ends)
+  + w_own * the robot's OWN contribution: the share of the map it saw this step
+    that no robot had seen before the step.
+Coverage = fraction of the map's free cells seen. All terms but the last are
+shared by the team. With only shared terms (w_own 0, stage 1) every robot gets
+the same reward whatever it did, and a robot that stands still is paid for its
+teammates' work (the "lazy agent" of team rewards); the own term is the
+individual coverage reward of MAANS and ACE (paper, Sec. VI).
 
 Localization is perfect in this version (all maps share one frame).
 
@@ -162,6 +168,7 @@ class EnvConfig:
     w_know: float = 5.0
     time_cost: float = 0.02
     success_bonus: float = 1.0
+    w_own: float = 0.0             # per unit of coverage the robot itself added that the team had not seen
     # ── stage 2: SLAM and compute state (off = stage 1, unchanged) ──
     slam_model: bool = False
     tick_s: float = 0.67           # seconds per tick (0.1 m at 0.15 m/s)
@@ -173,6 +180,9 @@ class EnvConfig:
     work_new: float = 0.6          # s of work per tick x share of the sensor disk newly seen
     work_import: float = 1.0       # s of work per sensor disk of teammate map received
     work_merge: float = 3.0        # s of work for a new merge (place recognition burst)
+    work_area: float = 0.0         # cells: the unit of area of work_new and work_import (0: this sensor's disk,
+                                   # as first calibrated; 317 = the disk of the 1 m range, so the SLAM work per
+                                   # mapped cell does not change with the grid range)
     backlog_max: float = 10.0
     lag0: float = 0.05             # s frame lag with nothing waiting
     lag_crit: float = 1.5          # s lag where tracking loss becomes likely
@@ -251,6 +261,7 @@ class ExploreEnv:
         self.rays, self.ray_ang = G.ray_table(c.sensor_range, c.n_rays, self.dev)
         self.ig_kernel = G.disk_kernel(c.sensor_range, self.dev)
         self.ig_norm = float(self.ig_kernel.sum())
+        self.work_norm = c.work_area or self.ig_norm     # area unit of the SLAM work (work_new, work_import)
         self.fov = math.radians(c.fov_deg)
         B, N, H, W, d = self.B, self.N, self.H, self.W, self.dev
         self.map_idx = torch.zeros(B, dtype=torch.long, device=d)
@@ -581,7 +592,7 @@ class ExploreEnv:
         self.goal_yaw = torch.where(m, torch.full_like(self.goal_yaw, float('nan')), self.goal_yaw)
 
     def step(self, actions):
-        """actions: (B, N) long candidate indices. Returns obs, reward (B,), done (B,), info."""
+        """actions: (B, N) long candidate indices. Returns obs, reward (B, N), done (B,), info."""
         c, B, N, H, W = self.cfg, self.B, self.N, self.H, self.W
         a = actions.clamp(0, c.n_candidates - 1)
         valid = torch.gather(self.cand_mask, 2, a[..., None]).squeeze(-1)
@@ -619,6 +630,8 @@ class ExploreEnv:
             stand = self.stand[:, None].expand(B, N, H, W).reshape(-1, H, W)[ch]
             self.goal_field.view(-1, H, W)[ch] = G.distance_field(stand, src)
         old_tc, old_kc = self.team_cov.clone(), self.know_cov.clone()
+        if c.w_own:
+            team_before = self.seen_free.any(1) & self.target                 # (B, H, W)
         if c.slam_model:
             old_merged = self.merged.clone()
             old_gap = self._known_count(integrated=True) - self._known_count(integrated=False)
@@ -638,7 +651,7 @@ class ExploreEnv:
         if c.slam_model:
             # map data arriving from teammates, and the place-recognition burst of a new merge
             gap = self._known_count(integrated=True) - self._known_count(integrated=False)
-            imported = (gap - old_gap).clamp(min=0) / self.ig_norm
+            imported = (gap - old_gap).clamp(min=0) / self.work_norm
             new_merges = (self.merged & ~old_merged).sum(2).float()
             self.backlog = (self.backlog + c.work_import * imported + c.work_merge * new_merges).clamp(max=c.backlog_max)
         self.team_cov, self.know_cov = self._coverage()
@@ -655,6 +668,11 @@ class ExploreEnv:
                       + c.w_link * self.step_links)
         if self.graph:
             reward = reward + c.w_conn * self.step_conn + c.w_merge * self.step_merge + c.w_unc * self.step_unc
+        reward = reward[:, None].expand(B, N)                                 # the team part: the same for all
+        if c.w_own:                  # each robot's own part: cells it saw this step that nobody had seen before
+            mine = self.seen_free & self.target[:, None] & ~team_before[:, None]
+            self.step_own = mine.flatten(2).sum(2) / self.n_target[:, None]
+            reward = reward + c.w_own * self.step_own
         info = {'done_team_cov': self.team_cov[done], 'done_know_cov': self.know_cov[done],
                 'done_steps': self.t[done], 'done_t90': self.t90[done], 'done_success': success[done],
                 'done_dist': self.dist[done].mean(1), 'done_merged': self.merged[done].float().mean((1, 2)),
@@ -686,7 +704,7 @@ class ExploreEnv:
         mv = moving.float()
         lost_now = self.lost > 0
         # work in, work done
-        work = c.work_move * mv + c.work_new * new_cells / self.ig_norm
+        work = c.work_move * mv + c.work_new * new_cells / self.work_norm
         self.backlog = (self.backlog + work - c.capacity).clamp(0, c.backlog_max)
         lag = c.lag0 + self.backlog
         # tracking loss while moving

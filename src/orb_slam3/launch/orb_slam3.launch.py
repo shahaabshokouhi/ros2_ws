@@ -133,6 +133,13 @@ def generate_launch_description():
                         '(multi-robot simulation). Empty on the robots.'
         ),
         DeclareLaunchArgument(
+            'grid_range',
+            default_value='2.0',
+            description='Occupancy grid range (m): obstacles and free space only this close '
+                        '(grid.max_range; 1.0 before 13 Oct 2026). The exploration policy is trained '
+                        'for the same range (ma_explore sensor_range), and Nav2 marks obstacles up to it.'
+        ),
+        DeclareLaunchArgument(
             'extra_params',
             default_value='',
             description='Optional YAML file of orb_slam3_node parameters applied on top '
@@ -171,6 +178,7 @@ def launch_nodes(context):
     camera          = LaunchConfiguration('camera').perform(context).strip().lower() \
         in ('true', '1', 'yes', 'on')
     extra_params    = LaunchConfiguration('extra_params').perform(context).strip()
+    grid_range      = float(LaunchConfiguration('grid_range').perform(context))
     frame_prefix    = LaunchConfiguration('frame_prefix').perform(context).strip()
     nav             = LaunchConfiguration('nav').perform(context).strip().lower() \
         in ('true', '1', 'yes', 'on')
@@ -281,6 +289,7 @@ def launch_nodes(context):
             {'nav_frames': nav},
             {'grid.map_half_size': 10.0 if nav else 0.0},   # nav: a 20 x 20 m map from the start
             {'grid.pose_source': nav_pose},
+            {'grid.max_range': grid_range},
             {'publish_gray': teleop},
             {'frame_prefix': frame_prefix},
         ] + ([extra_params] if extra_params else []),

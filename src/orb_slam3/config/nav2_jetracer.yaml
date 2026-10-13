@@ -94,7 +94,7 @@
     GridBased:
       # Hybrid-A*: searches x, y AND heading with car motions only, so every
       # path respects the turning radius; Reeds-Shepp allows reversing
-      # (three-point turns). Plans through unknown space: with a 1 m sensor
+      # (three-point turns). Plans through unknown space: with a 2 m sensor
       # range most of the map is unknown, and it replans as it sees more.
       plugin: "nav2_smac_planner/SmacPlannerHybrid"
       motion_model_for_search: "REEDS_SHEPP"
@@ -224,17 +224,17 @@
                                             # lies at z = 0, so SLAM's height noise could drop every point
       observation_sources: scan
       scan:
-        topic: /__AGENT__/orb_slam3/scan     # live 1 m scan from the depth camera
+        topic: /__AGENT__/orb_slam3/scan     # live scan from the depth camera, up to grid.max_range (2 m)
         data_type: "LaserScan"
         marking: True
         clearing: True
         inf_is_valid: True                  # +inf = seen free to full range
         min_obstacle_height: -1.0           # the scan lies in the floor plane (z = 0)
         max_obstacle_height: 2.0
-        obstacle_max_range: 0.95            # below 1 m: Nav2 turns +inf into a point at range_max - 0.1 mm,
-                                            # which would be marked as an obstacle 1 m away in every free direction
+        obstacle_max_range: 1.95            # below the 2 m range: Nav2 turns +inf into a point at range_max - 0.1 mm,
+                                            # which would be marked as an obstacle 2 m away in every free direction
         obstacle_min_range: 0.0
-        raytrace_max_range: 1.0
+        raytrace_max_range: 2.0
         raytrace_min_range: 0.0
     inflation_layer:
       plugin: "nav2_costmap_2d::InflationLayer"
@@ -270,17 +270,17 @@
                                             # lies at z = 0, so SLAM's height noise could drop every point
       observation_sources: scan
       scan:
-        topic: /__AGENT__/orb_slam3/scan     # live 1 m scan from the depth camera
+        topic: /__AGENT__/orb_slam3/scan     # live scan from the depth camera, up to grid.max_range (2 m)
         data_type: "LaserScan"
         marking: True
         clearing: True
         inf_is_valid: True                  # +inf = seen free to full range
         min_obstacle_height: -1.0           # the scan lies in the floor plane (z = 0)
         max_obstacle_height: 2.0
-        obstacle_max_range: 0.95            # below 1 m: Nav2 turns +inf into a point at range_max - 0.1 mm,
-                                            # which would be marked as an obstacle 1 m away in every free direction
+        obstacle_max_range: 1.95            # below the 2 m range: Nav2 turns +inf into a point at range_max - 0.1 mm,
+                                            # which would be marked as an obstacle 2 m away in every free direction
         obstacle_min_range: 0.0
-        raytrace_max_range: 1.0
+        raytrace_max_range: 2.0
         raytrace_min_range: 0.0
     inflation_layer:
       plugin: "nav2_costmap_2d::InflationLayer"

@@ -90,7 +90,7 @@ namespace orbslam3_nav {
 
 struct GridParams {
     double resolution        = 0.05;   // m per cell
-    double maxRange          = 1.0;    // obstacles and free space only this close (m)
+    double maxRange          = 2.0;    // obstacles and free space only this close (m; 1.0 until 13 Oct 2026)
     double minHeight         = 0.03;   // obstacle band above the floor (m) ...
     double maxHeight         = 0.20;   // ... up to the robot's top plus a margin
     double belowFloor        = 0.03;   // points further below the floor are reflections
