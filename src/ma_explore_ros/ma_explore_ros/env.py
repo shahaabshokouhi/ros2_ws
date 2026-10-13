@@ -1,4 +1,4 @@
-# Copied from ma_explore (54d3ca2) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (55b8544) by scripts/sync_robot_package.sh: edit it there, not here.
 """Batched multi-robot exploration environment on the GPU.
 
 B environments x N robots step together. Each robot has its OWN map (what it
@@ -143,6 +143,10 @@ class EnvConfig:
     fov_deg: float = 360.0         # camera field of view (360: all around)
     inflate: int = 1               # cells kept clear around obstacles for driving
     n_candidates: int = 16         # incl. index 0 (keep goal / stay)
+    goal_standoff: int = 0         # cells: a frontier goal is placed this far back along the robot's path to
+                                   # it, on known free ground, facing the frontier, not on the edge of the
+                                   # unknown where an unseen obstacle can end up right in front of the camera
+                                   # (real robot, 13 October). 0: the frontier cell itself (before).
     turn_at_own_frontier: bool = True  # a new goal on the robot's own cell (a frontier because the unknown is
                                        # behind a narrow camera) turns it around to look (False: it stands
                                        # still, and rule-based planners then stay stuck; before 12 October)
@@ -301,6 +305,7 @@ class ExploreEnv:
         K = c.n_candidates
         self.cand_yaw = torch.full((B, N, K), float('nan'), device=d)       # target heading (revisit poses)
         self.cand_mate = torch.full((B, N, K), -1, dtype=torch.long, device=d)  # whose pose (revisit poses)
+        self.view_yaw = torch.full((B, N), float('nan'), device=d)       # heading to take at a viewpoint goal
         if self.poses:
             self.trail_tick = torch.full((B, N, H, W), -1, dtype=torch.int32, device=d)   # last visit
             self.trail_head = torch.zeros(B, N, H, W, device=d)                           # heading then
@@ -532,7 +537,7 @@ class ExploreEnv:
             best = torch.where(better, v, best)
             by = torch.where(better, y + dy, by)
             bx = torch.where(better, x + dx, bx)
-        frozen = self.waiting.view(-1)
+        frozen = self.waiting.view(-1) | ~self.has_goal.view(-1)      # no goal: stand (a stale path field must not move it)
         if self.cfg.slam_model:
             frozen = frozen | (self.lost.view(-1) > 0)
         if self.poses:
@@ -555,6 +560,9 @@ class ExploreEnv:
             self.turning.view(-1)[turning] -= 1
             moving = moving | turning
             self._start_turn(reached & self.has_goal)
+        else:                                    # without turn modelling: face the frontier at a stand-off goal
+            arr = reached & self.has_goal & ~torch.isnan(self.view_yaw)
+            self.heading[arr] = self.view_yaw[arr]
         self.has_goal &= ~reached
         return moving.view(B, N), step.view(B, N), turn.view(B, N)
 
@@ -592,9 +600,15 @@ class ExploreEnv:
                 back = here & torch.isnan(self.goal_yaw)
                 self.goal_yaw = torch.where(back, self.heading + math.pi, self.goal_yaw)
             self._start_turn(here)                                         # already there: just turn
-        elif c.turn_at_own_frontier:
-            self.heading = torch.where(here, torch.remainder(self.heading + 2 * math.pi, 2 * math.pi) - math.pi,
-                                       self.heading)
+        else:
+            yaw = torch.gather(self.cand_yaw, 2, a[..., None]).squeeze(-1)
+            self.view_yaw = torch.where(go, yaw, torch.where(change, torch.full_like(yaw, float('nan')), self.view_yaw))
+            face = here & ~torch.isnan(self.view_yaw)                     # a viewpoint here: face the unknown
+            self.heading = torch.where(face, self.view_yaw, self.heading)
+            if c.turn_at_own_frontier:
+                flip = here & ~face
+                self.heading = torch.where(flip, torch.remainder(self.heading + 2 * math.pi, 2 * math.pi) - math.pi,
+                                           self.heading)
         self.has_goal &= ~(self.goal == self.pos).all(-1)
         ch = (change & self.has_goal).view(-1).nonzero().squeeze(1)
         if ch.numel():
@@ -992,6 +1006,38 @@ class ExploreEnv:
         score = torch.where(fr & (Dr < G.INF), ig, torch.zeros((), device=d))
         cells, ok = G.top_candidates(score.view(-1, H, W), c.n_candidates - n_fixed - n_rev - n_own, c.nms_radius)
         cells, ok = cells.view(B, N, -1, 2), ok.view(B, N, -1)
+        vyaw = None
+        if c.goal_standoff > 0:
+            # stand off: walk back from the frontier towards the robot (down its path distance), each step to the
+            # neighbour farthest from unknown space, until goal_standoff cells from any unknown cell, on known
+            # free ground: the goal is there, on the way to the frontier, so the camera looks at the edge of
+            # the unknown instead of driving into it. No heading is imposed (the robot arrives as it drives:
+            # a car told to face a set heading at the goal manoeuvres on the spot; Isaac, 13 October). If no
+            # such cell is near the path (or the robot is already that close), the frontier stays the goal.
+            Du = G.distance_field(free.view(-1, H, W), unknown.view(-1, H, W)).view(B, N, H, W)
+            Pd = F.pad(Dr.view(B * N, H, W), (1, 1, 1, 1), value=G.INF).view(B, N, H + 2, W + 2)
+            bi_ = torch.arange(B, device=d)[:, None, None].expand_as(cells[..., 0])
+            ni_ = torch.arange(N, device=d)[None, :, None].expand_as(cells[..., 0])
+            frontier, v = cells.clone(), cells.clone()
+            done_ = torch.zeros_like(ok)
+            for _ in range(2 * c.goal_standoff):
+                here_d = Dr[bi_, ni_, v[..., 0], v[..., 1]]
+                best = torch.full_like(here_d, -1.0)
+                nxt = v.clone()
+                for dy, dx, _ in G._SHIFTS:
+                    yy, xx = v[..., 0] + dy, v[..., 1] + dx
+                    dv = Pd[bi_, ni_, yy + 1, xx + 1]
+                    yy, xx = yy.clamp(0, H - 1), xx.clamp(0, W - 1)
+                    du = Du[bi_, ni_, yy, xx]
+                    sc = du.clamp(max=c.goal_standoff) * 1000.0 - dv
+                    good = (dv < here_d) & free[bi_, ni_, yy, xx] & stand_known[bi_, ni_, yy, xx] & (sc > best)
+                    best = torch.where(good, sc, best)
+                    nxt = torch.where(good[..., None], torch.stack([yy, xx], -1), nxt)
+                v = torch.where(done_[..., None], v, nxt)
+                done_ = done_ | (Du[bi_, ni_, v[..., 0], v[..., 1]] >= c.goal_standoff)
+            moved = done_ & (v != frontier).any(-1) & ok
+            cells = torch.where(moved[..., None], v, frontier)
+            vyaw = (moved, frontier)
         keep = torch.where(self.has_goal[..., None], self.goal, self.pos)[:, :, None]
         fixed = [keep] + ([self.pos[:, :, None]] if n_fixed == 2 else [])                # keep, wait (stay here)
         rev_conn = rev_merge = None
@@ -1013,9 +1059,28 @@ class ExploreEnv:
             ocells, ook, own_gain = self._own_revisit_poses(stand_known, Dr, n_fixed + n_rev)
             fixed.append(ocells)
         self.cand = torch.cat(fixed + [cells], 2)
+        nfr = cells.shape[2]                     # which frontier slots stand off, and their frontier cells
+        self.cand_stood = torch.zeros(B, N, c.n_candidates, dtype=torch.bool, device=d)
+        self.cand_front = self.cand.clone()
+        if vyaw is not None:
+            self.cand_stood[..., -nfr:], self.cand_front[..., -nfr:, :] = vyaw
         self.cand_mask = torch.cat([torch.ones(B, N, n_fixed, dtype=torch.bool, device=d)]
                                    + ([rok] if n_rev else []) + ([ook] if n_own else []) + [ok], 2)
         K = c.n_candidates
+        # the heading a robot arrives with: the direction of the last step of its shortest path to the goal
+        # (the live planner gives it to Nav2, so the car does not turn on the spot at a goal)
+        P = F.pad(Dr.view(B * N, H, W), (1, 1, 1, 1), value=G.INF).view(B, N, H + 2, W + 2)
+        cy0, cx0 = self.cand[..., 0], self.cand[..., 1]
+        bi0 = torch.arange(B, device=d)[:, None, None].expand(B, N, K)
+        ni0 = torch.arange(N, device=d)[None, :, None].expand(B, N, K)
+        best = torch.full((B, N, K), float(G.INF), device=d)
+        prev = torch.zeros(B, N, K, 2, device=d)
+        for dy, dx, _ in G._SHIFTS:
+            v = P[bi0, ni0, cy0 + 1 + dy, cx0 + 1 + dx]
+            better = v < best
+            best = torch.where(better, v, best)
+            prev = torch.where(better[..., None], torch.tensor([float(dy), float(dx)], device=d), prev)
+        self.cand_arrive = torch.atan2(-prev[..., 0], -prev[..., 1])                 # from the previous cell to the goal
         # candidate features
         rel = (self.cand - self.pos[:, :, None]).float()
         cy, cx = self.cand[..., 0], self.cand[..., 1]

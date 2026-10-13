@@ -1,4 +1,4 @@
-# Copied from ma_explore (54d3ca2) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (55b8544) by scripts/sync_robot_package.sh: edit it there, not here.
 """ROS 2 planner for one robot: picks its next exploration goal and sends it to Nav2.
 
     python -m ma_explore.ros_planner --ros-args -p agent:=sim_1 -p agents:="sim_1 sim_2 sim_3" \\
@@ -146,6 +146,11 @@ class Planner(Node):
         self.rec_speed = p('recovery_speed', 0.1)        # m/s
         self.rec_tries = p('recovery_attempts', 2)
         self.rec_test_at = p('recovery_test_at', -1.0)   # testing: pretend a loss this many s after the start
+        # close enough: a car within near_dist m of its goal for near_s s counts as there, even if Nav2 is
+        # still manoeuvring to match the goal heading (a car cannot turn on the spot; Isaac, 13 October)
+        self.near_dist = p('near_dist', 0.15)
+        self.near_s = p('near_s', 6.0)
+        self.near_since = None
         out = os.path.expanduser(p('out', '.'))
         self.start_file = os.path.expanduser(p('start_file', ''))
         assert self.me in self.agents
@@ -466,6 +471,21 @@ class Planner(Node):
         if not self.enabled:
             return
         xy = self.pose[self.me][:2]
+        if self.goal is not None and self.paused_until is None and math.dist(xy, self.goal) < self.near_dist:
+            self.near_since = self.near_since or now
+            if now - self.near_since > self.near_s:
+                self.get_logger().info(f'{self.me}: at ({self.goal[0]:.2f}, {self.goal[1]:.2f}) within '
+                                       f'{math.dist(xy, self.goal):.2f} m for {self.near_s:.0f} s: counted as reached')
+                self.blocked.append((self.goal[0], self.goal[1], now + self.block_time))
+                if self.goal_handle is not None:
+                    self.goal_seq += 1                      # the cancel must not look like a failure
+                    self.goal_handle.cancel_goal_async()
+                self.goal, self.goal_yaw, self.near_since = None, None, None
+                self.publish_goal()
+                self.decide('close enough')
+                return
+        else:
+            self.near_since = None
         if self.paused_until is not None:
             if now >= self.paused_until:
                 self.decide('waited')
@@ -500,7 +520,8 @@ class Planner(Node):
         if res['goal'] is not None:
             gyaw = res.get('goal_yaw')
             if gyaw is None and math.dist(res['goal'], (x, y)) < 0.15:
-                # a frontier on its own cell (the unknown is behind the camera): turn around, as in training
+                # a goal on its own cell (the unknown is behind the camera): turn around, as in training;
+                # with goal_standoff it is offered only where the 0.5 m around the car is known
                 gyaw = (yaw + 2 * math.pi) % (2 * math.pi) - math.pi
             self.send(res['goal'], gyaw)
         elif res.get('wait'):
@@ -678,9 +699,15 @@ class Planner(Node):
         msg.pose.header.frame_id = self.frame(self.me, 'map_nav')
         msg.pose.header.stamp = self.get_clock().now().to_msg()
         msg.pose.pose.position.x, msg.pose.pose.position.y = float(goal[0]), float(goal[1])
-        # a revisit pose: the heading the teammate had there (the same view); else
-        # arrive facing the way it drove
-        yaw = goal_yaw if goal_yaw is not None else math.atan2(goal[1] - y, goal[0] - x)
+        # a revisit pose: the heading the teammate had there (the same view); else the straight line from
+        # the car to the goal: the way it drives in, so Nav2 (yaw tolerance 0.6 rad) does not turn the car
+        # on the spot at the goal, where the camera could swing towards an obstacle it has not seen. (The
+        # last step of the grid path was tried: it can differ from the car's heading by more than the
+        # tolerance, and the cars then manoeuvred at their goals for minutes; Isaac, 13 October.)
+        if goal_yaw is not None:
+            yaw = goal_yaw
+        else:
+            yaw = math.atan2(goal[1] - y, goal[0] - x)
         msg.pose.pose.orientation.z, msg.pose.pose.orientation.w = math.sin(yaw / 2), math.cos(yaw / 2)
         self.nav.send_goal_async(msg).add_done_callback(lambda f: self.on_accepted(f, seq, goal))
         self.publish_goal()

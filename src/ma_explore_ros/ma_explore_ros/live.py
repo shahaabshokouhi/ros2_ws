@@ -1,4 +1,4 @@
-# Copied from ma_explore (54d3ca2) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (55b8544) by scripts/sync_robot_package.sh: edit it there, not here.
 """Decisions from live maps: the bridge between a running robot and the policy.
 
 No ROS here, so it can be tested on its own. A robot's planner (ros_planner.py)
@@ -270,5 +270,7 @@ class Decider:
                 'mate': mate if (kind == 'revisit' and mate > 0) else None,
                 'goal': None if (keep or wait) else tuple(win.to_xy(cand[a])),
                 'goal_yaw': None if (keep or wait or math.isnan(yaw)) else yaw,
+                # the heading it arrives with along its shortest path (for a frontier goal's Nav2 heading)
+                'arrive_yaw': float(e.cand_arrive[0, 0, a]),
                 'candidates': win.to_xy(cand[mask]), 'n_candidates': int(mask[1:].sum()), 'offered': offered,
                 'window': win, 'obs': obs, 'ms': 1e3 * (time.perf_counter() - t0)}

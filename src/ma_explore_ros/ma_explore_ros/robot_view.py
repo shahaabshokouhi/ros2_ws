@@ -1,4 +1,4 @@
-# Copied from ma_explore (54d3ca2) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (55b8544) by scripts/sync_robot_package.sh: edit it there, not here.
 """Live view of exploring robots without ground truth (real robots): one panel
 per robot, in that robot's own map frame (a window; it only watches).
 
