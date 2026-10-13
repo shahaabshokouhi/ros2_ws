@@ -16,6 +16,8 @@ Needs SLAM, the grid and Nav2 running on the robot (run_slam3.sh --nav, or
   frames   plain: map_nav, odom, ... (run_slam3.sh --nav); prefixed:
            <agent>/map_nav, ... (--ma-frames, several robots on one ROS domain)
   start_enabled  false: wait for /ma_explore/<agent>/enable (std_msgs/Bool true)
+  goal_standoff  cells (0.1 m) frontier goals stand back from the unknown (default 5:
+           0.5 m, also for a policy trained without it); -1: the policy's own setting
 Decisions, logs and tracking-loss events: ~/result/ma_explore_robot/<date>_<time>_<agent>/.
 """
 import datetime
@@ -56,7 +58,8 @@ def setup(context):
         package='ma_explore_ros', executable='planner', name=f'ma_explore_planner_{agent}', output='screen',
         parameters=[{'agent': agent, 'agents': agents, 'policy': policy, 'device': get('device'),
                      'frame_prefix': 'agent' if frames == 'prefixed' else 'none', 'out': out,
-                     'start_enabled': get('start_enabled').lower() in ('true', '1', 'yes')}],
+                     'start_enabled': get('start_enabled').lower() in ('true', '1', 'yes'),
+                     'goal_standoff': int(get('goal_standoff'))}],
         # torch.compile needs a C++ toolchain and takes long to warm up on the robot: plain kernels
         additional_env={'MA_EXPLORE_NO_COMPILE': '1', 'OMP_NUM_THREADS': '2'},
     )]
@@ -70,6 +73,7 @@ def generate_launch_description():
         DeclareLaunchArgument('frames', default_value='plain'),
         DeclareLaunchArgument('device', default_value='cpu'),
         DeclareLaunchArgument('start_enabled', default_value='true'),
+        DeclareLaunchArgument('goal_standoff', default_value='5'),
         DeclareLaunchArgument('out', default_value='~/result/ma_explore_robot'),
         OpaqueFunction(function=setup),
     ])

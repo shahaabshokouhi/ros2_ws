@@ -1,4 +1,4 @@
-# Copied from ma_explore (55b8544) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (2f60eaf) by scripts/sync_robot_package.sh: edit it there, not here.
 """ROS 2 planner for one robot: picks its next exploration goal and sends it to Nav2.
 
     python -m ma_explore.ros_planner --ros-args -p agent:=sim_1 -p agents:="sim_1 sim_2 sim_3" \\
@@ -160,6 +160,12 @@ class Planner(Node):
         self.prefixed = p('frame_prefix', 'agent') != 'none'
         torch.set_num_threads(2)
         pol, env_cfg, H = load_policy(policy, device, p('env_config', ''))   # env_config: baselines only
+        # stand-off goals (env goal_standoff) for any policy: it changes where frontier goals are placed,
+        # not the observation's size, so a policy trained without it still runs; -1 = the policy's own
+        so = p('goal_standoff', -1)
+        if so >= 0 and so != env_cfg.goal_standoff:
+            import dataclasses
+            env_cfg = dataclasses.replace(env_cfg, goal_standoff=int(so))
         if p('prefer_revisit', False):
             pol = self.revisit_first(pol, env_cfg)
         # the policy's team size: robots that are not there count as never merged (as before a merge)

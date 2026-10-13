@@ -1,4 +1,4 @@
-# Copied from ma_explore (55b8544) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (2f60eaf) by scripts/sync_robot_package.sh: edit it there, not here.
 """Batched multi-robot exploration environment on the GPU.
 
 B environments x N robots step together. Each robot has its OWN map (what it
