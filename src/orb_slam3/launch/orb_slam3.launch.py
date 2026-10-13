@@ -102,6 +102,17 @@ def generate_launch_description():
                         'Goals: RViz 2D Goal Pose on /<agent>/goal_pose'
         ),
         DeclareLaunchArgument(
+            'explore',
+            default_value='false',
+            description='With nav: autonomous exploration by the trained ma_explore policy '
+                        '(package ma_explore_ros; its policy/policy.pt)'
+        ),
+        DeclareLaunchArgument('explore_team', default_value='',
+                              description='With explore: the robots of the team, this one included'),
+        DeclareLaunchArgument('explore_policy', default_value='',
+                              description='With explore: the policy file (default ma_explore_ros policy/policy.pt)'),
+        DeclareLaunchArgument('explore_device', default_value='cpu'),
+        DeclareLaunchArgument(
             'nav_pose',
             default_value='slam',
             description='With nav: where the robot pose for Nav2 comes from. slam: '
@@ -309,6 +320,19 @@ def launch_nodes(context):
 
     if nav:
         nodes += nav2_nodes(agent, frame_prefix)
+    if LaunchConfiguration('explore').perform(context).strip().lower() in ('true', '1', 'yes', 'on'):
+        if not nav:
+            raise RuntimeError('explore needs nav (Nav2)')
+        from launch.actions import IncludeLaunchDescription
+        from launch.launch_description_sources import PythonLaunchDescriptionSource
+        nodes.append(IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(os.path.join(get_package_share_directory('ma_explore_ros'),
+                                                       'launch', 'explore.launch.py')),
+            launch_arguments={'agent': agent,
+                              'agents': LaunchConfiguration('explore_team').perform(context),
+                              'policy': LaunchConfiguration('explore_policy').perform(context),
+                              'device': LaunchConfiguration('explore_device').perform(context),
+                              'frames': 'prefixed' if frame_prefix else 'plain'}.items()))
 
     return nodes
 

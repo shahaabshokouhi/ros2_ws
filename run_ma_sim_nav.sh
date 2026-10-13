@@ -42,7 +42,7 @@ done
 SPEC_NAME=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['name'])" "$SPEC")
 AGENTS=$(python3 -c "import json,sys; print(' '.join(json.load(open(sys.argv[1]))['agents']))" "$SPEC")
 N=$(echo $AGENTS | wc -w)
-PREFIX=${AGENTS%%_1 *}
+PREFIX=${AGENTS%%_1*}
 [ "$AGENTS" = "$(for k in $(seq 1 $N); do printf '%s_%d ' "$PREFIX" $k; done | sed 's/ $//')" ] ||
     { echo "spec agents must be named <prefix>_1 .. <prefix>_N (got: $AGENTS)"; return 1; }
 

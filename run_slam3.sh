@@ -19,6 +19,17 @@
 #                                  # goals with RViz "2D Goal Pose" (./run_rviz.sh <agent>).
 #                                  # The controller's position feedback is the SLAM pose.
 #   ./run_slam3.sh --nav-wheels    # same, but position from wheel odometry corrected by SLAM
+#   ./run_slam3.sh --explore       # autonomous exploration: --nav plus the trained ma_explore
+#                                  # policy on this robot (src/ma_explore_ros, policy/policy.pt;
+#                                  # see src/ma_explore_ros/README.md). Options: --team "r1 r2 r3"
+#                                  # (the whole team, several robots: add --ma-frames),
+#                                  # --policy FILE. Pause: ros2 topic pub --once
+#                                  # /ma_explore/$AGENT_NAME/enable std_msgs/msg/Bool "{data: false}"
+#   ./run_slam3.sh --nav --ma-frames   # several robots on one ROS domain: this robot's TF frames
+#                                  # get its name as prefix (<agent>/map_nav, <agent>/odom, ...),
+#                                  # as in the multi-robot simulation. For autonomous exploration
+#                                  # (ma_explore on a PC: scripts/run_robot_explore.sh AGENT ...);
+#                                  # RViz then: ./run_rviz.sh <agent> <agent>
 #
 # When saving is on, each keyframe's RGB + depth and the final optimized
 # keyframe poses are written to a slam_00N folder (default under ~/result) in
@@ -38,6 +49,10 @@ OCCUPANCY_GRID=false
 TELEOP=false
 NAV=false
 NAV_POSE=slam
+MA_FRAMES=false
+EXPLORE=false
+EXPLORE_TEAM=""
+EXPLORE_POLICY=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --save|--save-keyframes|save|yes|true)
@@ -85,10 +100,28 @@ while [[ $# -gt 0 ]]; do
             NAV_POSE=wheels
             shift
             ;;
+        --ma-frames)
+            MA_FRAMES=true
+            shift
+            ;;
+        --explore)
+            EXPLORE=true
+            NAV=true
+            shift
+            ;;
+        --team)
+            EXPLORE_TEAM="$2"
+            shift 2
+            ;;
+        --policy)
+            EXPLORE_POLICY="$(realpath "$2")"
+            shift 2
+            ;;
         *)
             echo "Unknown argument: $1"
             echo "Usage: ./run_slam3.sh [--save] [--method new|hq-mpshare] [--imu|--imu-auto|--no-imu]"
-            echo "                      [--monitor] [--monitor-rate HZ] [--grid] [--teleop] [--nav|--nav-wheels]"
+            echo "                      [--monitor] [--monitor-rate HZ] [--grid] [--teleop] [--nav|--nav-wheels] [--ma-frames]"
+            echo "                      [--explore [--team \"r1 r2 r3\"] [--policy FILE]]"
             exit 1
             ;;
     esac
@@ -103,6 +136,30 @@ if [ -z "$AGENT_NAME" ]; then
     exit 1
 fi
 
+if [ "$EXPLORE" = "true" ]; then
+    POL="${EXPLORE_POLICY:-$(cd "$(dirname "$0")" && pwd)/src/ma_explore_ros/policy/policy.pt}"
+    if [ ! -f "$POL" ]; then
+        echo "Error: no policy file $POL"
+        echo "  copy the trained network there (src/ma_explore_ros/policy/README.md)"
+        exit 1
+    fi
+    if ! python3 -c "import torch" 2>/dev/null; then
+        echo "Error: PyTorch is not installed for $(command -v python3): pip3 install --user torch"
+        exit 1
+    fi
+    N_TEAM=$(echo $EXPLORE_TEAM | wc -w)
+    if [ "$N_TEAM" -gt 1 ] && [ "$MA_FRAMES" != "true" ]; then
+        echo "Error: a team of several robots needs --ma-frames (each robot's TF frames named after it)"
+        exit 1
+    fi
+fi
+
+if [ "$MA_FRAMES" = "true" ] && [ "$NAV_POSE" = "wheels" ]; then
+    # the base driver publishes plain 'odom -> base_footprint'; with prefixed frames Nav2 would not find it
+    echo "Error: --ma-frames needs the SLAM pose (--nav), not --nav-wheels."
+    exit 1
+fi
+
 if [ "$SAVE_KEYFRAMES" = "true" ]; then
     echo "Keyframe saving: ENABLED (result_dir=${RESULT_DIR:-\$HOME/result})"
 else
@@ -114,9 +171,12 @@ echo "Jetson monitor: $MONITOR (${MONITOR_RATE} Hz)"
 echo "Occupancy grid: $OCCUPANCY_GRID"
 echo "Teleop: $TELEOP"
 echo "Navigation: $NAV (robot pose from: $NAV_POSE)"
+echo "Exploration: $EXPLORE${EXPLORE_TEAM:+ (team: $EXPLORE_TEAM)}"
+echo "TF frames: $([ "$MA_FRAMES" = "true" ] && echo "prefixed ($AGENT_NAME/map_nav, ...)" || echo "plain (map_nav, ...)")"
 [ "$NAV" = "true" ] && echo "  Nav2 starts once the floor is calibrated (keep the floor in view, a few seconds)."
 
 colcon build --packages-select orb_slam3 --cmake-clean-cache
+if [ "$EXPLORE" = "true" ]; then colcon build --packages-select ma_explore_ros; fi
 source install/setup.bash
 
 # ros2 launch rejects an empty '<name>:=' value, so only pass result_dir when
@@ -154,6 +214,13 @@ if [ "$TELEOP" = "true" ] || [ "$NAV" = "true" ]; then
 fi
 if [ -n "$RESULT_DIR" ]; then
     LAUNCH_ARGS+=(result_dir:="$RESULT_DIR")
+fi
+if [ "$MA_FRAMES" = "true" ]; then
+    LAUNCH_ARGS+=(frame_prefix:="$AGENT_NAME")
+fi
+if [ "$EXPLORE" = "true" ]; then
+    LAUNCH_ARGS+=(explore:=true explore_policy:="$POL")
+    [ -n "$EXPLORE_TEAM" ] && LAUNCH_ARGS+=(explore_team:="$EXPLORE_TEAM")
 fi
 
 # Optional CPU dedication for the tracking thread (see the core-dedication
