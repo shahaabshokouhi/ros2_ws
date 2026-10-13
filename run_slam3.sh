@@ -144,7 +144,9 @@ if [ "$EXPLORE" = "true" ]; then
         exit 1
     fi
     if ! python3 -c "import torch" 2>/dev/null; then
-        echo "Error: PyTorch is not installed for $(command -v python3): pip3 install --user torch"
+        echo "Error: PyTorch is not installed for $(command -v python3)."
+        echo "  On a Jetson do not pip-install torch from PyPI: see 'Requirements: PyTorch on a Jetson'"
+        echo "  in src/ma_explore_ros/README.md (CPU-only build, or NVIDIA's wheel for this JetPack)."
         exit 1
     fi
     N_TEAM=$(echo $EXPLORE_TEAM | wc -w)

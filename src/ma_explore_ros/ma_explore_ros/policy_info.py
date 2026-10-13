@@ -12,10 +12,16 @@ def main():
 
     import numpy as np
     try:
-        import torch  # noqa: F401
+        import torch
     except ImportError:
-        print('PyTorch is not installed for this Python (see the package README: pip3 install --user torch)')
+        print(f'PyTorch is not installed for {sys.executable}: see "Requirements: PyTorch on a Jetson" in the '
+              'ma_explore_ros README (CPU-only build, or NVIDIA\'s wheel for your JetPack)')
         sys.exit(1)
+    print(f'PyTorch {torch.__version__} ({"CUDA available" if torch.cuda.is_available() else "CPU only"}), '
+          f'numpy {np.__version__}, {sys.executable}')
+    if int(np.__version__.split('.')[0]) >= 2:
+        print('  WARNING: numpy 2.x: ROS 2 Humble Python packages are built against numpy 1.x '
+              '(pip3 install --user "numpy<2")')
     from .live import Decider, Robot
     from .policy_io import load_policy_file
     path = sys.argv[1] if len(sys.argv) > 1 else None

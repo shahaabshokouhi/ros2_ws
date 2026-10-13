@@ -37,10 +37,44 @@ row of `<agent>_slam_events.csv`.
 `policy/policy.pt` (see policy/README.md). `ros2 run ma_explore_ros policy_info`
 prints which training run it comes from and times a decision.
 
-## Requirements
+## Requirements: PyTorch on a Jetson
 
-PyTorch for the robot's ROS Python (3.10): `pip3 install --user torch`
-(the CPU wheel for aarch64 is enough: one decision every few seconds).
+Do **not** `pip3 install torch` from PyPI on a Jetson: recent aarch64 PyPI
+wheels are CUDA builds for server ARM (SBSA), not for the Jetson's integrated
+GPU and JetPack, and pip may also upgrade numpy to 2.x, which breaks ROS 2
+Humble's Python packages (built against numpy 1.x). PyTorch must be importable
+by the Python that ROS 2 runs (`/usr/bin/python3`, 3.10 on JetPack 6 / Ubuntu 22.04).
+
+First check what the robot has:
+
+    cat /etc/nv_tegra_release                      # L4T release (R36.x = JetPack 6.x)
+    apt-cache show nvidia-jetpack 2>/dev/null | grep -m1 Version
+    python3 -c "import numpy; print(numpy.__version__)"
+
+Then one of:
+
+* **A. CPU-only PyTorch (enough for this planner, independent of JetPack).**
+  The planner runs on the CPU (`device:=cpu`, the default), about one
+  decision every few seconds. PyTorch's CPU-only build has no CUDA, so it does
+  not need to match JetPack:
+
+      pip3 install --user --index-url https://download.pytorch.org/whl/cpu "torch==2.4.*"
+      python3 -c "import numpy; print(numpy.__version__)"   # must still be 1.x
+
+  If numpy was upgraded, put it back: `pip3 install --user "numpy<2"`.
+
+* **B. NVIDIA's PyTorch for your JetPack (if you also want the GPU).**
+  Follow NVIDIA's "Installing PyTorch for Jetson Platform" guide and take the
+  wheel built for exactly your JetPack and Python (cp310 for JetPack 6), from
+  NVIDIA's index (developer.download.nvidia.com/compute/redist/jp/<v60|v61|...>/pytorch/)
+  or NVIDIA's "PyTorch for Jetson" forum page; install its listed prerequisites
+  first (e.g. `libopenblas-dev`; newer builds also need cuSPARSELt). Install
+  the wheel with `pip3 install --user <file>.whl` and check numpy as in A.
+  Then the planner can use `device:=cuda`, though the CPU is fast enough.
+
+Check: `ros2 run ma_explore_ros policy_info` prints the PyTorch and numpy
+versions, whether CUDA is available, which network is installed and how long a
+decision takes on this computer.
 
 ## Where the code comes from
 
