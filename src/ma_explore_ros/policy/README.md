@@ -3,7 +3,7 @@
 Copy the network to use into this folder as `policy.pt`:
 
     scp <PC>:~/result/ma_explore/runs/<run>/checkpoints/robot_policy.pt \
-        ~/workspaces/ros2_ws/src/ma_explore_ros/policy/policy.pt
+        ~/ros2_ws/src/ma_explore_ros/policy/policy.pt    # the robots: ~/ros2_ws
 
 `robot_policy.pt` is written at the end of every training run (the best
 checkpoint's actor and settings, about 2.5 MB); the training log and the run's
