@@ -1,4 +1,4 @@
-# Copied from ma_explore (3c9821f) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (54d3ca2) by scripts/sync_robot_package.sh: edit it there, not here.
 """Batched multi-robot exploration environment on the GPU.
 
 B environments x N robots step together. Each robot has its OWN map (what it
@@ -81,6 +81,19 @@ Where links come from (link_model):
     pair has link_strong measurements, then link_rate_slow), as long as the
     views both maps hold exceed link_views per link. The link joins the two
     graphs where both robots first had a random one of those shared views.
+
+Loops (loop_model 'views', with graph_model): a robot that sees at least
+loop_views of its own views again (first seen loop_age ticks ago or more) gets,
+at loop_rate per second, an edge in its own graph from its newest node to the
+node of the oldest such view: ORB-SLAM3 ties new keyframes to old ones that saw
+the same points (covisibility); explicit loop closures are rarer. Its pose
+uncertainty is the effective resistance between its first and newest node
+(+1 per node along a plain path, so it grows with every keyframe; parallel
+paths through loops and links lower it). A loop cuts drift by the share of the
+uncertainty it removes; reward + w_unc x uncertainty removed. With
+n_self_revisit, REVISIT-OWN slots offer the robot's own older poses (cell and
+heading), ranked by the uncertainty a loop there would remove (exact for one
+edge: r^2 / (1 + R_nc), from the same eigendecomposition).
 """
 import math
 from dataclasses import dataclass, field
@@ -113,6 +126,10 @@ def obs_dims(cfg):
         d['mate'] += 1
         d['scalars'] += 1
         d['state_scalars'] += 2
+    if cfg.graph_model and cfg.n_self_revisit:   # is an own pose; uncertainty a loop there removes; own uncertainty
+        d['cand'] += 2
+        d['scalars'] += 1
+        d['state_scalars'] += 1
     return d
 
 
@@ -167,6 +184,17 @@ class EnvConfig:
     p_loop: float = 0.05           # per eligible tick
     loop_gain: float = 0.5         # drift x (1 - loop_gain) on a loop closure
     loop_cooldown: int = 16
+    # loops (stage 2): 'random' = p_loop per tick on ground seen loop_age ticks ago (the first model);
+    # 'views' (needs link_model views) = when the camera sees at least loop_views of the robot's own
+    # views (cell x heading bin) first seen loop_age ticks ago, at loop_rate per second, as ORB-SLAM3's
+    # place recognition needs a similar view; with graph_model it joins the robot's newest graph node to
+    # the node of that old view and cuts drift as much as it cuts the pose uncertainty (graph resistance)
+    loop_model: str = 'random'
+    loop_views: int = 10
+    loop_rate: float = 0.5
+    n_self_revisit: int = 0        # REVISIT-OWN slots: the robot's own older poses (cell + heading), ranked
+                                   # by the pose uncertainty a loop there would remove (graph_model)
+    w_unc: float = 0.0             # reward per unit of pose uncertainty removed by loop closures
     p_link: float = 0.1            # per tick on ground a merged teammate saw first
     link_gain: float = 0.5         # pull towards the teammate's drift
     link_cooldown: int = 16
@@ -260,6 +288,9 @@ class ExploreEnv:
             self.step_drift = torch.zeros(B, device=d)      # avoidable drift added - drift corrected
         assert not (c.graph_model and not c.pose_revisit), 'graph_model needs pose_revisit (links at poses)'
         assert c.link_model in ('pose', 'views'), c.link_model
+        assert c.loop_model in ('random', 'views'), c.loop_model
+        assert not (c.loop_model == 'views' and c.link_model != 'views'), "loop_model views needs link_model views"
+        assert not (c.n_self_revisit and not (c.graph_model and c.pose_revisit)), 'n_self_revisit needs graph_model'
         self.views = c.slam_model and c.link_model == 'views'
         if self.views:
             assert c.max_steps * c.ticks < 2 ** 15, 'first_view keeps ticks as int16'
@@ -291,6 +322,12 @@ class ExploreEnv:
             self.obs_node = torch.zeros(B, dtype=torch.long, device=d)
             self.step_conn = torch.zeros(B, device=d)
             self.step_merge = torch.zeros(B, device=d)
+            self.step_unc = torch.zeros(B, device=d)                       # pose uncertainty removed by loops
+            self.unc = torch.zeros(B, N, device=d)                         # pose uncertainty (graph resistance)
+            self.loop_node_gain = torch.zeros(B, N, self.M, device=d)           # what a loop to each own node removes
+        if self.views:
+            self.old_views = torch.zeros(B, N, device=d)                   # own old views in sight now
+            self.old_view_tick = torch.zeros(B, N, dtype=torch.long, device=d)
 
     # ── episodes ─────────────────────────────────────────────────────────
     def reset(self):
@@ -365,6 +402,9 @@ class ExploreEnv:
             self.node_gain[idx] = 0
             self.step_conn[idx] = 0
             self.step_merge[idx] = 0
+            self.step_unc[idx] = 0
+            self.unc[idx] = 0
+            self.loop_node_gain[idx] = 0
         self._sense(idx)
         self._merge()
         tc, kc = self._coverage()
@@ -395,6 +435,16 @@ class ExploreEnv:
                                  / (2 * math.pi / nb)).long().clamp(max=nb - 1)
                 vi = seen_i * nb + hb[seen_i // (H * W)]
                 fv = self.first_view[envs].reshape(-1)
+                if self.cfg.loop_model == 'views':     # own views first seen long ago, in sight now (loops)
+                    first = fv[vi].long()
+                    ri = vi // (H * W * nb)                                              # robot (env-major)
+                    now_t = self.tick[envs][vi // (N * H * W * nb)]
+                    old = (first >= 0) & (now_t - first >= self.cfg.loop_age)
+                    cnt = torch.bincount(ri[old], minlength=k * N).float()
+                    oldest = torch.full((k * N,), 10 ** 9, dtype=torch.long, device=self.dev)
+                    oldest.scatter_reduce_(0, ri[old], first[old], reduce='amin')
+                    self.old_views[envs] = cnt.view(k, N)
+                    self.old_view_tick[envs] = oldest.view(k, N)
                 vi = vi[fv[vi] < 0]
                 fv[vi] = self.tick[envs][vi // (N * H * W * nb)].to(torch.int16)
                 self.first_view[envs] = fv.view(k, N, H, W, nb)
@@ -563,6 +613,7 @@ class ExploreEnv:
         if self.graph:
             self.step_conn.zero_()
             self.step_merge.zero_()
+            self.step_unc.zero_()
         for _ in range(c.ticks):
             moving, steplen, turn = self._drive()
             new_cells = self._sense()
@@ -588,7 +639,7 @@ class ExploreEnv:
             reward = (reward - c.w_drift * drift_term - c.w_lost * self.step_lost / (N * c.ticks)
                       + c.w_link * self.step_links)
         if self.graph:
-            reward = reward + c.w_conn * self.step_conn + c.w_merge * self.step_merge
+            reward = reward + c.w_conn * self.step_conn + c.w_merge * self.step_merge + c.w_unc * self.step_unc
         info = {'done_team_cov': self.team_cov[done], 'done_know_cov': self.know_cov[done],
                 'done_steps': self.t[done], 'done_t90': self.t90[done], 'done_success': success[done],
                 'done_dist': self.dist[done].mean(1), 'done_merged': self.merged[done].float().mean((1, 2)),
@@ -641,9 +692,17 @@ class ExploreEnv:
         fs_here = self.first_seen[bi, ni, py, px]                                  # (B, N) my first look at my cell
         tick = self.tick[:, None]
         ok = ~(self.lost > 0)
-        loop = (ok & moving & (fs_here >= 0) & (tick - fs_here >= c.loop_age) & (tick - self.last_loop >= c.loop_cooldown)
-                & (self._rand(B, N) < c.p_loop))
-        self.drift = torch.where(loop, self.drift * (1 - c.loop_gain), self.drift)
+        if c.loop_model == 'views':
+            # seeing enough of its own old views again, from a similar direction: ORB-SLAM3 place recognition
+            loop = (ok & moving & (self.old_views >= c.loop_views) & (tick - self.last_loop >= c.loop_cooldown)
+                    & (self._rand(B, N) < c.loop_rate * c.tick_s))
+        else:
+            loop = (ok & moving & (fs_here >= 0) & (tick - fs_here >= c.loop_age)
+                    & (tick - self.last_loop >= c.loop_cooldown) & (self._rand(B, N) < c.p_loop))
+        cut = torch.full_like(self.drift, c.loop_gain)
+        if self.graph and c.loop_model == 'views' and loop.any():
+            cut = self._loop_edges(loop)                                   # share of the uncertainty removed
+        self.drift = torch.where(loop, self.drift * (1 - cut), self.drift)
         self.last_loop = torch.where(loop, tick.expand(B, N), self.last_loop)
         mate = self.merged & ~torch.eye(N, dtype=torch.bool, device=d)
         their_tick = mine_tick = None
@@ -725,6 +784,26 @@ class ExploreEnv:
         """(B, i, j) merge error one more link would remove, in units of merge_err0()."""
         return (self._merr(self.links) - self._merr(self.links + 1)) / self.merge_err0()
 
+    def _loop_edges(self, loop):
+        """Loop closures go into each robot's own graph, from its newest node (as of the
+        last decision) to the node of the oldest own view in sight; the uncertainty they
+        remove is rewarded. Returns (B, N): the share of the uncertainty removed."""
+        c, M, N = self.cfg, self.M, self.N
+        b, i = loop.nonzero(as_tuple=True)
+        seen = self.obs_node[b]
+        now = torch.minimum((self.tick[b] // c.node_ticks).clamp(max=M - 1), seen)
+        then = torch.minimum((self.old_view_tick[b, i] // c.node_ticks).clamp(0, M - 1), seen)
+        du = torch.where(then < now, self.loop_node_gain[b, i, then], torch.zeros_like(now, dtype=torch.float))
+        self.step_unc.index_add_(0, b, du)
+        share = torch.zeros(self.B, N, device=self.dev)
+        share[b, i] = (du / self.unc[b, i].clamp(min=1e-6)).clamp(0, 0.9)
+        mine, theirs = i * M + now, i * M + then
+        real = then < now
+        b, mine, theirs, i = b[real], mine[real], theirs[real], i[real]
+        self.gedge[b, i, mine, theirs] += 1.0
+        self.gedge[b, i, theirs, mine] += 1.0
+        return share
+
     def _shared_view_ticks(self, link):
         """For each new link (B, i, j): a random view both robots hold, and the
         ticks each first had it. Returns (mine, theirs), (B, N, N) int (0 elsewhere)."""
@@ -783,6 +862,24 @@ class ExploreEnv:
         self.node_gain = torch.where(ok[:, None] & allowed.view(B * N, NM), gain, torch.zeros_like(gain)).view(B, N, NM)
         if self.views:      # kept for the gain of links from older nodes (_edge_gain)
             self._eig = (ev, V, lam2, ok, allowed.view(B * N, NM))
+        # pose uncertainty: effective resistance between my first node (the anchor) and my newest node,
+        # R = (e_0 - e_n)^T L+ (e_0 - e_n): one per node along a plain path (it grows with every keyframe),
+        # less when loops and links give parallel paths; plus the part of the newest node driven so far.
+        # A loop edge newest-c (weight 1) removes r^2 / (1 + R_nc), r = (e_0 - e_n)^T L+ (e_n - e_c).
+        r_ = torch.arange(B * N, device=d)
+        inv = torch.where((ev > 1e-6) & (ev < 25.0), 1.0 / ev.clamp(min=1e-6), torch.zeros_like(ev))   # L+ spectrum
+        anchor = (torch.arange(N, device=d)[None] * M).expand(B, N).reshape(-1)
+        za = V[r_, anchor] - V[r_, a]                                                   # (BN, K)
+        frac = ((self.tick % self.cfg.node_ticks).float() / self.cfg.node_ticks)[:, None].expand(B, N)
+        self.unc = (za ** 2 * inv).sum(-1).view(B, N) + frac
+        if self.cfg.n_self_revisit:
+            own = (torch.arange(NM, device=d) // M)[None] == torch.arange(N, device=d).repeat(B)[:, None]   # (BN, NM)
+            rr = (Z * (za * inv)[:, None, :]).sum(-1)                                    # (BN, NM)
+            Rnc = (Z ** 2 * inv[:, None, :]).sum(-1)
+            gain = rr ** 2 / (1.0 + Rnc)
+            gain = torch.where(own & allowed.view(B * N, NM), gain, torch.zeros_like(gain))
+            self.loop_node_gain = gain.view(B, N, N, M)[torch.arange(B, device=d)[:, None],
+                                                        torch.arange(N, device=d)[None], torch.arange(N, device=d)[None]]
 
     def _secular_gain(self, ev, Z2, lam2):
         """Relative lambda2 gain of one edge: ev (.., NM) eigenvalues, Z2 (.., NM)
@@ -808,6 +905,25 @@ class ExploreEnv:
         z2 = (V[r, na] - V[r, nb]) ** 2                                              # (L, NM)
         g = self._secular_gain(ev[r], z2, lam2[r])
         return torch.where(ok[r] & allowed[r, na] & allowed[r, nb], g, torch.zeros_like(g))
+
+    def _own_revisit_poses(self, stand_known, Dr, s0):
+        """REVISIT-OWN slots s0..: the robot's own poses driven loop_age ticks ago or earlier,
+        ranked by the pose uncertainty a loop there would remove, for the path. Fills
+        cand_yaw (the heading it had there). Returns cells (B, N, n, 2), valid, gain (B, N, n)."""
+        c, B, N, H, W, d, M = self.cfg, self.B, self.N, self.H, self.W, self.dev, self.M
+        n, HW = c.n_self_revisit, H * W
+        tt = self.trail_tick.view(B, N, HW).long()                                  # my own last visit per cell
+        old = (tt >= 0) & (self.tick[:, None, None] - tt >= c.loop_age)
+        node = (tt // c.node_ticks).clamp(0, M - 1)
+        gain = self.loop_node_gain.gather(2, node)                                 # (B, N, HW)
+        ok = (old & (stand_known & (Dr < G.INF)).view(B, N, HW))
+        score = torch.where(ok, (0.02 + gain) / (1 + Dr.view(B, N, HW) / 20.0), torch.zeros((), device=d))
+        cells, cok = G.top_candidates(score.view(-1, H, W), n, c.revisit_nms)
+        cells, cok = cells.view(B, N, n, 2), cok.view(B, N, n)
+        flat = cells[..., 0] * W + cells[..., 1]
+        yaw = self.trail_head.view(B, N, HW).gather(2, flat)
+        self.cand_yaw[..., s0:s0 + n] = torch.where(cok, yaw, torch.full((), float('nan'), device=d))
+        return cells, cok, gain.gather(2, flat) * cok
 
     @staticmethod
     def _lam2_feat(lam2):
@@ -872,8 +988,9 @@ class ExploreEnv:
         mate = self.merged & ~torch.eye(N, dtype=torch.bool, device=d)              # (B, N, N) i knows j
         n_fixed = self.n_fixed()
         n_rev = c.n_revisit if c.slam_model else 0
+        n_own = c.n_self_revisit if self.graph else 0
         score = torch.where(fr & (Dr < G.INF), ig, torch.zeros((), device=d))
-        cells, ok = G.top_candidates(score.view(-1, H, W), c.n_candidates - n_fixed - n_rev, c.nms_radius)
+        cells, ok = G.top_candidates(score.view(-1, H, W), c.n_candidates - n_fixed - n_rev - n_own, c.nms_radius)
         cells, ok = cells.view(B, N, -1, 2), ok.view(B, N, -1)
         keep = torch.where(self.has_goal[..., None], self.goal, self.pos)[:, :, None]
         fixed = [keep] + ([self.pos[:, :, None]] if n_fixed == 2 else [])                # keep, wait (stay here)
@@ -891,9 +1008,13 @@ class ExploreEnv:
             rcells, rok = G.top_candidates(rscore.view(-1, H, W), n_rev, c.revisit_nms)
             fixed.append(rcells.view(B, N, -1, 2))
             rok = rok.view(B, N, -1)
+        own_gain = None
+        if n_own:
+            ocells, ook, own_gain = self._own_revisit_poses(stand_known, Dr, n_fixed + n_rev)
+            fixed.append(ocells)
         self.cand = torch.cat(fixed + [cells], 2)
         self.cand_mask = torch.cat([torch.ones(B, N, n_fixed, dtype=torch.bool, device=d)]
-                                   + ([rok] if n_rev else []) + [ok], 2)
+                                   + ([rok] if n_rev else []) + ([ook] if n_own else []) + [ok], 2)
         K = c.n_candidates
         # candidate features
         rel = (self.cand - self.pos[:, :, None]).float()
@@ -935,6 +1056,12 @@ class ExploreEnv:
                 cg[..., n_fixed:n_fixed + n_rev] = rev_conn / c.conn_cap
                 mg[..., n_fixed:n_fixed + n_rev] = rev_merge
             feats += [cg, mg]
+        if n_own:
+            is_own = torch.zeros(B, N, K, device=d)
+            ug = torch.zeros(B, N, K, device=d)
+            is_own[..., n_fixed + n_rev:n_fixed + n_rev + n_own] = 1
+            ug[..., n_fixed + n_rev:n_fixed + n_rev + n_own] = (own_gain / 2.0).clamp(max=2)
+            feats += [is_own, ug]
         cand_feat = torch.stack(feats, -1)
         # teammate features (known only once merged)
         rel_p = (ppos[:, None] - ppos[:, :, None])                                 # (B, N, N, 2): j relative to i
@@ -973,6 +1100,8 @@ class ExploreEnv:
                       (self.links.sum(2) / (c.link_cap * max(1, N - 1))).clamp(max=1)]
         if self.graph:       # algebraic connectivity of my own pose graph (log scale)
             slist.append(self._lam2_feat(self.lam2))
+        if n_own:            # my pose uncertainty (graph resistance, in path nodes of node_ticks)
+            slist.append((self.unc / 10.0).clamp(max=3))
         scalars = torch.stack(slist, -1)
         # critic: global state, once per environment (5 planes); the critic
         # adds each robot's own position plane (planes[:, :, 4]) itself.
@@ -987,6 +1116,8 @@ class ExploreEnv:
             pair = (self.merged & ~torch.eye(N, dtype=torch.bool, device=d)).float()
             sslist += [self._lam2_feat(self.lam2).mean(1),
                        (self.merge_err() / self.merge_err0() * pair).sum((1, 2)) / pair.sum((1, 2)).clamp(min=1)]
+        if n_own:
+            sslist.append((self.unc.mean(1) / 10.0).clamp(max=3))
         state_scalars = torch.stack(sslist, -1)
         return {'planes': planes.to(torch.uint8), 'cand': cand_feat, 'cand_mask': self.cand_mask,
                 'mates': mates, 'scalars': scalars, 'cand_cells': self.cand,

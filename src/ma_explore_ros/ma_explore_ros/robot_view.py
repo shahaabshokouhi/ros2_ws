@@ -1,4 +1,4 @@
-# Copied from ma_explore (3c9821f) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (54d3ca2) by scripts/sync_robot_package.sh: edit it there, not here.
 """Live view of exploring robots without ground truth (real robots): one panel
 per robot, in that robot's own map frame (a window; it only watches).
 
@@ -33,7 +33,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy  # noqa: E
 from std_msgs.msg import String  # noqa: E402
 
 COLORS = ['#2a78d6', '#e8833a', '#1aa37a', '#c0458a', '#8a6fd1', '#b8a12a']     # as isaac_view.py
-KINDS = ('frontier', 'keep', 'wait', 'revisit')
+KINDS = ('frontier', 'keep', 'wait', 'revisit', 'loop')
 
 
 def describe(act):
@@ -42,6 +42,8 @@ def describe(act):
         return 'no decision yet'
     if k == 'revisit':
         return f"REVISIT {act.get('mate', '')}'s pose"
+    if k == 'loop':
+        return 'LOOP: own old pose'
     return {'wait': 'WAIT', 'keep': 'keep goal', 'stay': 'stay (no goal)', 'frontier': 'new goal'}.get(k, k)
 
 
@@ -127,7 +129,7 @@ class RobotView(Node):
                 ax.set_ylim(ext[2] + r0 * r - 0.8, ext[2] + (r1 + 1) * r + 0.8)
         ax.set_aspect('equal')
         for x, y, k in act.get('offered', []):
-            ax.plot([x], [y], 'D' if k == 'revisit' else 'o', ms=5, mfc='none', mec=c, mew=1.2, alpha=0.8)
+            ax.plot([x], [y], 'D' if k in ('revisit', 'loop') else 'o', ms=5, mfc='none', mec=c, mew=1.2, alpha=0.8)
         if self.trail[a]:
             ax.plot(*zip(*self.trail[a]), '-', color=c, lw=2)
         for name, (mx, my, myaw) in act.get('mates', {}).items():
@@ -143,7 +145,7 @@ class RobotView(Node):
                      head_length=0.12, length_includes_head=True, fc=c, ec='black', lw=0.8, zorder=5)
             g = act.get('goal')
             if g is not None:
-                revisit = kind == 'revisit' or (kind in ('keep', 'wait') and act.get('goal_yaw') is not None)
+                revisit = kind in ('revisit', 'loop') or (kind in ('keep', 'wait') and act.get('goal_yaw') is not None)
                 ax.plot([x, g[0]], [y, g[1]], ':', color=c, lw=1.5)
                 ax.plot([g[0]], [g[1]], 'D' if revisit else '*', ms=11 if revisit else 16, color=c, mec='black',
                         mew=1.0, zorder=6)
@@ -161,9 +163,10 @@ class RobotView(Node):
         links = ' '.join(f'{k}:{v}' for k, v in act.get('links', {}).items()) or '-'
         self.panel[a].set_text(
             f"#{act.get('decision', 0):<3d} {describe(act):24s} backlog {act.get('backlog', 0.0):.1f} s\n"
-            f"new {n['frontier']}  keep {n['keep']}  wait {n['wait']}  revisit {n['revisit']}   links {links}\n"
+            f"new {n['frontier']}  keep {n['keep']}  wait {n['wait']}  revisit {n['revisit']}  loop {n['loop']}   links {links}\n"
             f"offered: {sum(1 for o in act.get('offered', []) if o[2] == 'frontier')} frontiers, "
-            f"{sum(1 for o in act.get('offered', []) if o[2] == 'revisit')} revisit poses")
+            f"{sum(1 for o in act.get('offered', []) if o[2] == 'revisit')} revisit poses, "
+            f"{sum(1 for o in act.get('offered', []) if o[2] == 'loop')} own poses (loops)")
 
     def update(self):
         for i, a in enumerate(self.agents):

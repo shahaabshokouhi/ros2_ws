@@ -22,6 +22,16 @@ Results on the robot: `~/result/ma_explore_robot/<date>_<time>_<agent>/`
 (`<agent>_decisions.csv`: every decision and its kind; `<agent>_slam_events.csv`:
 every tracking loss, where, the heading, the goal's bearing, how long).
 
+## After a tracking loss
+
+The SLAM node's safety gate stops the car and cancels the goal. The planner
+waits 2 s, then backs the car up slowly along the last 0.8 m it drove (wheel
+odometry), so the camera sees again what it saw before the loss and ORB-SLAM3
+can relocalize; up to 2 attempts, then it stops and logs that it needs help
+(drive it back with the keyboard). Parameters: recovery, recovery_wait,
+recovery_back_m, recovery_speed, recovery_attempts. Every loss and recovery is a
+row of `<agent>_slam_events.csv`.
+
 ## Policy
 
 `policy/policy.pt` (see policy/README.md). `ros2 run ma_explore_ros policy_info`

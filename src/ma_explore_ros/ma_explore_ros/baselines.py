@@ -1,4 +1,4 @@
-# Copied from ma_explore (3c9821f) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (54d3ca2) by scripts/sync_robot_package.sh: edit it there, not here.
 """Classic decentralized exploration policies, on the same observations as the
 learned policy (each robot uses only its own integrated map and what it knows
 about merged teammates). All commit to a goal until it is reached.
@@ -12,7 +12,10 @@ about merged teammates). All commit to a goal until it is reached.
                SLAM backlog is over wait_backlog s; on choosing a new goal after
                more than revisit_after m without a map correction, the revisit
                pose with the most gain (connectivity + merge accuracy) within
-               revisit_max_m; otherwise coordinated. Stage 1: coordinated.
+               revisit_max_m; with own-pose slots, when the pose uncertainty is
+               over loop_unc (graph resistance, in nodes), the own pose whose loop
+               removes the most within revisit_max_m; otherwise coordinated.
+               Stage 1: coordinated.
 
 Candidate features (env.observe): 0-1 relative position, 2 path distance,
 3 straight distance (all / (H + W)), 4 information gain (fraction of the sensor
@@ -35,6 +38,8 @@ def _frontier_mask(obs):
     f = obs['cand']
     if f.shape[-1] > 8:                      # stage 2: features 8 (wait) and 9 (revisit)
         m &= (f[..., 8] == 0) & (f[..., 9] == 0)
+    if f.shape[-1] >= 17:                    # own-pose revisit slots (feature 15)
+        m &= f[..., 15] == 0
     return m
 
 
@@ -60,7 +65,7 @@ def coordinated(obs, beta=4.0, alpha=1.0, sigma=0.08):
     return _commit(obs, _argmax_or_stay(f[..., 4] - beta * f[..., 2] - penalty, _frontier_mask(obs)))
 
 
-def slam_rules(obs, wait_backlog=1.5, revisit_after=4.0, revisit_max_m=2.0, beta=4.0):
+def slam_rules(obs, wait_backlog=1.5, revisit_after=4.0, revisit_max_m=2.0, beta=4.0, loop_unc=3.0):
     f, sc, m = obs['cand'], obs['scalars'], obs['cand_mask']
     a = coordinated(obs)
     if f.shape[-1] <= 8:                     # stage 1 observation: no SLAM state
@@ -77,6 +82,11 @@ def slam_rules(obs, wait_backlog=1.5, revisit_after=4.0, revisit_max_m=2.0, beta
     r = _argmax_or_stay(gain - beta * f[..., 2], rev)
     go_rev = rev.any(-1) & ~has_goal & (since > revisit_after)
     a = torch.where(go_rev, r, a)
+    if f.shape[-1] >= 17:                    # own poses: close a loop when the pose uncertainty is high
+        unc = 10.0 * sc[..., -1]
+        own = m & (f[..., 15] > 0) & (f[..., 2] * far * 0.1 <= revisit_max_m)
+        o = _argmax_or_stay(f[..., 16] - beta * f[..., 2], own)
+        a = torch.where(own.any(-1) & ~has_goal & (unc > loop_unc), o, a)
     return torch.where(wait, wait_ok.float().argmax(-1), a)
 
 

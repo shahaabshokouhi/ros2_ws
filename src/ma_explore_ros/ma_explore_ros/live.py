@@ -1,4 +1,4 @@
-# Copied from ma_explore (3c9821f) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (54d3ca2) by scripts/sync_robot_package.sh: edit it there, not here.
 """Decisions from live maps: the bridge between a running robot and the policy.
 
 No ROS here, so it can be tested on its own. A robot's planner (ros_planner.py)
@@ -228,8 +228,8 @@ class Decider:
         if e.graph:
             M = e.M
             e.gedge[0] = 0
-            for j, r in enumerate(robots[1:], 1):
-                for mine, theirs in (r.edges if r.known else []):
+            for j, r in enumerate(robots):     # robot 0's edges: its own loop closures (own nodes)
+                for mine, theirs in (r.edges if (r.known or j == 0) else []):
                     a, b = min(int(mine), M - 1), j * M + min(int(theirs), M - 1)
                     e.gedge[0, 0, a, b] += 1.0
                     e.gedge[0, 0, b, a] += 1.0
@@ -256,11 +256,14 @@ class Decider:
         wait = a == 1 and e.n_fixed() == 2
         yaw = float(e.cand_yaw[0, 0, a])
         n_rev = self.cfg.n_revisit if self.cfg.slam_model else 0
-        kind = ('keep' if keep else 'wait' if wait
-                else 'revisit' if e.n_fixed() <= a < e.n_fixed() + n_rev else 'frontier')
+        n_own = self.cfg.n_self_revisit if e.graph else 0
+        nf0 = e.n_fixed()
+        kind = ('keep' if keep else 'wait' if wait else 'revisit' if nf0 <= a < nf0 + n_rev
+                else 'loop' if nf0 + n_rev <= a < nf0 + n_rev + n_own else 'frontier')
         mate = int(e.cand_mate[0, 0, a])
         nf = e.n_fixed()
-        slot_kind = lambda k: 'revisit' if nf <= k < nf + n_rev else 'frontier'       # noqa: E731
+        slot_kind = lambda k: ('revisit' if nf <= k < nf + n_rev else 'loop' if k < nf + n_rev + n_own  # noqa: E731
+                               else 'frontier')
         xy_all = win.to_xy(cand)
         offered = [(float(xy_all[k][0]), float(xy_all[k][1]), slot_kind(k)) for k in range(nf, len(cand)) if mask[k]]
         return {'action': a, 'keep': keep, 'wait': wait, 'kind': kind,

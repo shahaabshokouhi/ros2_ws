@@ -1,4 +1,4 @@
-# Copied from ma_explore (3c9821f) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (54d3ca2) by scripts/sync_robot_package.sh: edit it there, not here.
 """ROS 2 planner for one robot: picks its next exploration goal and sends it to Nav2.
 
     python -m ma_explore.ros_planner --ros-args -p agent:=sim_1 -p agents:="sim_1 sim_2 sim_3" \\
@@ -72,12 +72,13 @@ import json
 import math
 import os
 import time
+from collections import deque
 
 import numpy as np
 import rclpy
 import torch
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PointStamped, TransformStamped
+from geometry_msgs.msg import PointStamped, TransformStamped, Twist
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.action import ActionClient
@@ -88,6 +89,7 @@ from std_msgs.msg import Bool, Float64MultiArray, String
 from tf2_ros import Buffer, TransformListener
 
 from .live import Decider, Grid, Robot, load_policy
+from .recovery import BackTrack
 
 TRACKING_OK = 2          # ORB-SLAM3 Tracking::OK
 
@@ -136,6 +138,14 @@ class Planner(Node):
         # map: its tracking state says OK but no pose comes until it is back in the main map)
         self.pose_timeout = p('pose_timeout', 1.0)
         self.enabled = p('start_enabled', True)   # /ma_explore/<agent>/enable (Bool) switches it
+        # recovery after a tracking loss: wait, then back up along the path driven before the loss
+        # (wheel odometry, reverse, slowly) so the camera sees again what it saw; recovery.py
+        self.rec_on = p('recovery', True)
+        self.rec_wait = p('recovery_wait', 2.0)          # s to wait first (SLAM may relocalize by itself)
+        self.rec_back = p('recovery_back_m', 0.8)        # m backed up per attempt
+        self.rec_speed = p('recovery_speed', 0.1)        # m/s
+        self.rec_tries = p('recovery_attempts', 2)
+        self.rec_test_at = p('recovery_test_at', -1.0)   # testing: pretend a loss this many s after the start
         out = os.path.expanduser(p('out', '.'))
         self.start_file = os.path.expanduser(p('start_file', ''))
         assert self.me in self.agents
@@ -177,6 +187,13 @@ class Planner(Node):
         self.tracking = TRACKING_OK
         self.pose_t = {}                                  # when each robot's SLAM pose last came
         self.lost_since, self.last_kind = None, ''
+        self.slam_hist = deque(maxlen=400)                # my recent SLAM poses (wall time, x, y, yaw)
+        self.own_edges, self.reobs_s, self.last_loop_t = [], 0.0, -1e9   # own loop edges (re-observation)
+        self.corrections = None
+        self.last_new_merge_t = -1e9
+        self.wheel_hist = deque(maxlen=400)               # my wheel odometry (wall time, x, y, yaw)
+        self.rec = None                                   # recovery state while lost
+        self.test_lost = False
         latched = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
         for a in self.agents:
@@ -196,6 +213,8 @@ class Planner(Node):
         self.action_pub = self.create_publisher(String, f'/ma_explore/{self.me}/action', latched)
         self.known_pub = self.create_publisher(OccupancyGrid, f'/ma_explore/{self.me}/known_map', latched)
         self.create_subscription(Bool, f'/ma_explore/{self.me}/enable', self.on_enable, latched)
+        self.create_subscription(Odometry, f'/{self.me}/odom', self.on_wheel, 20)     # the base driver's wheel odometry
+        self.cmd_pub = self.create_publisher(Twist, f'/{self.me}/cmd_vel', 10)      # direct, as the keyboard teleop
         self.tf = Buffer()
         self.tfl = TransformListener(self.tf, self)
         self.nav = ActionClient(self, NavigateToPose, f'/{self.me}/navigate_to_pose')
@@ -221,6 +240,7 @@ class Planner(Node):
         self.log.writerow(['wall', 'decision', 'policy', 'action', 'keep', 'goal_x', 'goal_y', 'x', 'y', 'yaw',
                            'n_candidates', 'merged_with', 'decide_ms', 'reason', 'goal_yaw', 'kind', 'mate'])
         self.create_timer(0.5, self.tick)
+        self.create_timer(0.1, self.recovery_tick)
         self.get_logger().info(f'{self.me}: planner "{policy}" on {device}, team {self.agents}')
 
     @staticmethod
@@ -248,6 +268,11 @@ class Planner(Node):
     def on_odom(self, a, m):
         self.pose_t[a] = time.monotonic()
         q = m.pose.pose.orientation
+        if a == self.me:
+            px, py = m.pose.pose.position.x, m.pose.pose.position.y
+            h = self.slam_hist
+            if not h or math.hypot(px - h[-1][1], py - h[-1][2]) >= 0.02:
+                h.append((time.monotonic(), px, py, yaw_of(q)))
         self.pose[a] = (m.pose.pose.position.x, m.pose.pose.position.y, yaw_of(q))
         xy = self.pose[a][:2]
         tr = self.trails[a]
@@ -262,6 +287,8 @@ class Planner(Node):
 
     def on_merge(self, m):
         if m.child_frame_id in self.others:
+            if m.child_frame_id not in self.merge:
+                self.last_new_merge_t = time.monotonic()     # a map correction now is the merge, not a loop
             self.merge[m.child_frame_id] = (T_of(m.transform), time.monotonic())
 
     def on_metrics(self, m):
@@ -273,6 +300,34 @@ class Planner(Node):
                 self.lags.append(m.data[7] / 1000)
                 if len(self.lags) >= 150:
                     self.lag_base = float(np.median(self.lags))
+
+    def own_loops(self, dt):
+        """My loop edges as training forms them (env loop_model 'views'): while I see my own old
+        views again -- here: an own pose at least loop_age ticks old within 1 m, heading within
+        45 deg -- an edge from my newest node to that pose's node at loop_rate per second (at most
+        one per loop_cooldown ticks). ORB-SLAM3's explicit loop closures (slam_metrics corrections
+        without a new merge) add one too."""
+        c = self.decider.cfg
+        if not (self.decider.env.graph and c.loop_model == 'views') or not self.tposes[self.me]:
+            return
+        now_tick = self.tick_now()
+        x, y, yaw = self.pose[self.me]
+        old = [p for p in self.tposes[self.me] if now_tick - p[3] >= c.loop_age and math.hypot(p[0] - x, p[1] - y) < 1.0
+               and abs((p[2] - yaw + math.pi) % (2 * math.pi) - math.pi) < math.pi / 4]
+        corr = self.metrics[11]
+        explicit = (self.corrections is not None and corr > self.corrections
+                    and time.monotonic() - self.last_new_merge_t > 10.0)
+        self.corrections = corr
+        self.reobs_s = self.reobs_s + dt if old else 0.0
+        cool = (time.monotonic() - self.last_loop_t) >= c.loop_cooldown * c.tick_s
+        if old and cool and (explicit or self.reobs_s * c.loop_rate >= 1.0):
+            then = min(p[3] for p in old)
+            self.own_edges.append((now_tick // c.node_ticks, then // c.node_ticks))
+            self.reobs_s, self.last_loop_t = 0.0, time.monotonic()
+
+    def on_wheel(self, m):
+        q = m.pose.pose.orientation
+        self.wheel_hist.append((time.monotonic(), m.pose.pose.position.x, m.pose.pose.position.y, yaw_of(q)))
 
     def on_links(self, m):
         """Links per teammate beyond the merge match: ORB-SLAM3 counts the merge's
@@ -361,7 +416,7 @@ class Planner(Node):
             tp = np.c_[apply3(T, tp[:, :2]), tp[:, 2] + math.atan2(T[1, 0], T[0, 0]), tp[:, 3]]
         if a == self.me:
             since, backlog, lost = self.metrics[10], self.backlog(), self.tracking != TRACKING_OK
-            edges = []
+            edges = list(self.own_edges)                  # my loop edges (own nodes), as training keeps them
         else:
             since, backlog = self.status.get(a, (0.0, 0.0))
             lost = False
@@ -384,10 +439,19 @@ class Planner(Node):
             return
         if self.t_start is None:
             self.t_start = time.monotonic()
+        self.own_loops(0.5)
         st = Float64MultiArray()
         st.data = [float(self.metrics[10]), float(self.backlog())]
         self.status_pub.publish(st)
-        if self.tracking != TRACKING_OK or now - self.pose_t.get(self.me, -1e9) > self.pose_timeout:
+        if (self.rec_test_at > 0 and not self.test_lost and self.rec is None and self.t_start is not None
+                and now - self.t_start > self.rec_test_at):
+            self.rec_test_at = -1.0                       # once
+            self.test_lost = True
+            if self.goal_handle is not None:              # a real loss: the safety gate cancels the goal
+                self.goal_seq += 1
+                self.goal_handle.cancel_goal_async()
+            self.get_logger().warn(f'{self.me}: recovery test: acting as if tracking were lost')
+        if self.is_lost(now):
             if self.lost_since is None:           # the safety gate has stopped the car and cancelled the goal
                 self.lost_since = now
                 self.slam_event('lost', 0.0)
@@ -467,6 +531,97 @@ class Planner(Node):
             'since_corr': round(float(self.metrics[10]), 2), 'pose': [float(x), float(y), float(yaw)],
             'mates': {a: [float(v) for v in r.pose] for a, r in zip(self.others, robots[1:]) if r.known},
             'offered': res.get('offered', [])})))
+
+    def is_lost(self, now):
+        return (self.test_lost or self.tracking != TRACKING_OK
+                or now - self.pose_t.get(self.me, -1e9) > self.pose_timeout)
+
+    # ── recovery after a tracking loss ───────────────────────────────────
+    def recovery_tick(self):
+        now = time.monotonic()
+        if self.lost_since is None:
+            if self.rec is not None:                    # tracking is back
+                if self.rec['stage'] in ('drive', 'pause'):
+                    self.stop_car()
+                    self.slam_event('recovery_ok', now - self.rec['t_lost'])
+                    self.get_logger().info(f"{self.me}: recovered after backing up {self.rec['driven']:.2f} m")
+                self.rec = None
+            return
+        if not self.rec_on:
+            return
+        r = self.rec
+        if r is None:
+            r = self.rec = {'stage': 'wait', 't': now, 't_lost': self.lost_since, 'tries': 0, 'driven': 0.0,
+                            'loss': self.slam_hist[-1] if self.slam_hist else None}
+        if r['stage'] in ('failed', 'none'):
+            return
+        if r['stage'] in ('wait', 'pause') and now - r['t'] >= self.rec_wait:
+            if r['tries'] >= self.rec_tries:
+                r['stage'] = 'failed'
+                self.slam_event('recovery_failed', now - r['t_lost'])
+                self.get_logger().warn(f'{self.me}: tracking still lost after {r["tries"]} back-ups: '
+                                       'needs help (drive it back with the keyboard)')
+                return
+            bt = self.backtrack(r, (r['tries'] + 1) * self.rec_back)
+            if bt is None:
+                r['stage'] = 'none'
+                self.get_logger().warn(f'{self.me}: cannot back up (no wheel odometry on /{self.me}/odom, '
+                                       'or no path driven): waiting for tracking')
+                return
+            r.update(stage='drive', bt=bt, tries=r['tries'] + 1, t=now, check=(now, self.wheel_hist[-1][1:3]))
+            self.slam_event('recovery_start', now - r['t_lost'])
+            self.get_logger().info(f'{self.me}: backing up along the last {bt.length:.2f} m driven '
+                                   f'(attempt {r["tries"]})')
+        if r['stage'] == 'drive':
+            w = self.wheel_hist[-1]
+            if now - w[0] > 0.5:                          # no wheel odometry: do not drive blind
+                self.stop_car()
+                r['stage'] = 'none'
+                return
+            v, wz, done = r['bt'].command(w[1:])
+            if done:
+                self.stop_car()
+                r['driven'] += r['bt'].driven
+                r.update(stage='pause', t=now)
+                if self.test_lost:                        # test: the back-up itself is what is tested
+                    self.test_lost = False
+                return
+            t0, xy0 = r['check']
+            if now - t0 > 3.0:                            # not moving although commanded: blocked
+                if math.dist(xy0, w[1:3]) < 0.03:
+                    self.stop_car()
+                    r['driven'] += r['bt'].driven
+                    r.update(stage='pause', t=now, tries=self.rec_tries)
+                    self.get_logger().warn(f'{self.me}: backing up is blocked; stopping')
+                    return
+                r['check'] = (now, w[1:3])
+            cmd = Twist()
+            cmd.linear.x, cmd.angular.z = float(v), float(wz)
+            self.cmd_pub.publish(cmd)
+
+    def backtrack(self, r, back_m):
+        """A BackTrack over the last back_m metres driven before the loss, or None."""
+        if r['loss'] is None or not self.wheel_hist or len(self.slam_hist) < 3:
+            return None
+        hist = [h for h in self.slam_hist if h[0] <= r['loss'][0]]
+        path, dist = [hist[-1]], 0.0
+        for h in reversed(hist[:-1]):
+            dist += math.hypot(h[1] - path[-1][1], h[2] - path[-1][2])
+            path.append(h)
+            if dist >= back_m:
+                break
+        path = [(h[1], h[2], h[3]) for h in reversed(path)]
+        t_loss = r['loss'][0]
+        wl = min(self.wheel_hist, key=lambda w: abs(w[0] - t_loss))          # wheel pose at the loss
+        if abs(wl[0] - t_loss) > 1.0 or len(path) < 3:
+            return None
+        bt = BackTrack(path, r['loss'][1:], wl[1:], speed=self.rec_speed)
+        bt.sync(self.wheel_hist[-1][1:])
+        return bt
+
+    def stop_car(self):
+        for _ in range(3):
+            self.cmd_pub.publish(Twist())
 
     def slam_event(self, kind, duration):
         x, y, yaw = self.pose[self.me]
