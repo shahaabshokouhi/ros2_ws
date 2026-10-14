@@ -1,4 +1,4 @@
-# Copied from ma_explore (3d9354e) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (a5c2bd9) by scripts/sync_robot_package.sh: edit it there, not here.
 """Batched multi-robot exploration environment on the GPU.
 
 B environments x N robots step together. Each robot has its OWN map (what it
@@ -169,6 +169,14 @@ class EnvConfig:
     time_cost: float = 0.02
     success_bonus: float = 1.0
     w_own: float = 0.0             # per unit of coverage the robot itself added that the team had not seen
+    # the mission: stage 1 ends an episode once team coverage reaches `success`; a fixed-length mission
+    # (end_at_success False) runs max_steps decisions whatever the coverage, so the time left after
+    # the map is covered goes to the map's accuracy (links, merges, loops), and success only marks the
+    # moment (success_bonus once). At the end: + w_end_merged x share of robot pairs merged
+    # - w_end_unc x mean pose uncertainty / 10 (the state of the map the team hands over)
+    end_at_success: bool = True
+    w_end_merged: float = 0.0
+    w_end_unc: float = 0.0
     # ── stage 2: SLAM and compute state (off = stage 1, unchanged) ──
     slam_model: bool = False
     tick_s: float = 0.67           # seconds per tick (0.1 m at 0.15 m/s)
@@ -281,6 +289,7 @@ class ExploreEnv:
         self.goal_field = torch.full((B, N, H, W), G.INF, device=d)
         self.heading = torch.zeros(B, N, device=d)
         self.t = torch.zeros(B, dtype=torch.long, device=d)
+        self.ever_success = torch.zeros(B, dtype=torch.bool, device=d)
         self.dist = torch.zeros(B, N, device=d)
         self.t90 = torch.full((B,), -1, dtype=torch.long, device=d)
         self.cand = torch.zeros(B, N, c.n_candidates, 2, dtype=torch.long, device=d)
@@ -395,6 +404,7 @@ class ExploreEnv:
         self.merged[idx] = torch.eye(N, dtype=torch.bool, device=self.dev)
         self.overlap_since[idx] = -1
         self.t[idx] = 0
+        self.ever_success[idx] = False
         self.dist[idx] = 0
         self.t90[idx] = -1
         self.waiting[idx] = False
@@ -659,9 +669,17 @@ class ExploreEnv:
         hit90 = (self.t90 < 0) & (self.team_cov >= 0.9)
         self.t90 = torch.where(hit90, self.t, self.t90)
         success = self.team_cov >= c.success
-        done = success | (self.t >= c.max_steps)
+        first_success = success & ~self.ever_success                        # the bonus once, when it happens
+        self.ever_success |= success
+        done = (success & c.end_at_success) | (self.t >= c.max_steps)
         reward = (c.w_team * (self.team_cov - old_tc) + c.w_know * (self.know_cov - old_kc)
-                  - c.time_cost + c.success_bonus * success.float())
+                  - c.time_cost + c.success_bonus * first_success.float())
+        if c.w_end_merged or c.w_end_unc:          # the map the team hands over at the end of the mission
+            mate = self.merged & ~torch.eye(N, dtype=torch.bool, device=self.dev)
+            end = c.w_end_merged * mate.float().sum((1, 2)) / max(1, N * (N - 1))
+            if self.graph:
+                end = end - c.w_end_unc * self.unc.mean(1) / 10.0
+            reward = reward + end * done.float()
         if c.slam_model:
             drift_term = self.drift.mean(1) if c.drift_penalty == 'level' else self.step_drift / N
             reward = (reward - c.w_drift * drift_term - c.w_lost * self.step_lost / (N * c.ticks)
@@ -674,7 +692,7 @@ class ExploreEnv:
             self.step_own = mine.flatten(2).sum(2) / self.n_target[:, None]
             reward = reward + c.w_own * self.step_own
         info = {'done_team_cov': self.team_cov[done], 'done_know_cov': self.know_cov[done],
-                'done_steps': self.t[done], 'done_t90': self.t90[done], 'done_success': success[done],
+                'done_steps': self.t[done], 'done_t90': self.t90[done], 'done_success': self.ever_success[done],
                 'done_dist': self.dist[done].mean(1), 'done_merged': self.merged[done].float().mean((1, 2)),
                 'done_map': self.map_idx[done]}
         if c.slam_model:
@@ -683,7 +701,7 @@ class ExploreEnv:
         if self.graph:
             mate = self.merged[done] & ~torch.eye(N, dtype=torch.bool, device=self.dev)
             err = self.merge_err()[done]
-            info.update({'done_lam2': self.lam2[done].mean(1),
+            info.update({'done_lam2': self.lam2[done].mean(1), 'done_unc': self.unc[done].mean(1),
                          'done_merge_err': (err * mate).sum((1, 2)) / mate.sum((1, 2)).clamp(min=1)})
         self._reset(done)
         return self.observe(), reward, done, info

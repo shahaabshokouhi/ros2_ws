@@ -1,4 +1,4 @@
-# Copied from ma_explore (3d9354e) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (a5c2bd9) by scripts/sync_robot_package.sh: edit it there, not here.
 """ROS 2 planner for one robot: picks its next exploration goal and sends it to Nav2.
 
     python -m ma_explore.ros_planner --ros-args -p agent:=sim_1 -p agents:="sim_1 sim_2 sim_3" \\
@@ -138,6 +138,9 @@ class Planner(Node):
         # map: its tracking state says OK but no pose comes until it is back in the main map)
         self.pose_timeout = p('pose_timeout', 1.0)
         self.enabled = p('start_enabled', True)   # /ma_explore/<agent>/enable (Bool) switches it
+        # mission length (s): the policy's time input is the share of the mission gone, as in training
+        # (t / max_steps); 0: the number of decisions taken (policies trained to stop at a coverage goal)
+        self.mission_s = p('mission_s', 0.0)
         # recovery after a tracking loss: wait, then back up along the path driven before the loss
         # (wheel odometry, reverse, slowly) so the camera sees again what it saw; recovery.py
         self.rec_on = p('recovery', True)
@@ -361,6 +364,13 @@ class Planner(Node):
             return 0.0
         return max(0.0, self.metrics[7] / 1000 - self.lag_base) + 0.1 * max(0.0, self.metrics[8])
 
+    def mission_t(self):
+        """The time input in training steps: decisions taken, or with mission_s the share of the mission
+        gone x max_steps."""
+        if self.mission_s > 0 and self.t_start is not None:
+            return (time.monotonic() - self.t_start) / self.mission_s * self.decider.cfg.max_steps
+        return self.t_decisions
+
     def tick_now(self):
         """Time since the common start in training ticks (pose-graph nodes, visit times)."""
         if self.t_start is None:
@@ -520,13 +530,13 @@ class Planner(Node):
         self.blocked = [b for b in self.blocked if b[2] > now]
         robots = [self.robot(self.me)] + [self.robot(a) for a in self.others]
         robots += [Robot(known=False)] * (self.team - len(robots))
-        res = self.decider.decide(robots, self.trail, self.t_decisions,
+        res = self.decider.decide(robots, self.trail, self.mission_t(),
                                   blocked=[(b[0], b[1], b[3]) for b in self.blocked], tick=self.tick_now())
         n_goals = res['n_candidates'] - (1 if self.decider.env.n_fixed() == 2 else 0)
         if n_goals <= 0 and any(b[4] == 'reached' for b in self.blocked):
             # only goals near ones just reached are left: offer them again rather than stand still
             # (stand-off goals are often near where the car is; real robot, 13 October)
-            res = self.decider.decide(robots, self.trail, self.t_decisions, tick=self.tick_now(),
+            res = self.decider.decide(robots, self.trail, self.mission_t(), tick=self.tick_now(),
                                       blocked=[(b[0], b[1], b[3]) for b in self.blocked if b[4] != "reached"])
             n_goals = res['n_candidates'] - (1 if self.decider.env.n_fixed() == 2 else 0)
         self.t_decisions += 1
