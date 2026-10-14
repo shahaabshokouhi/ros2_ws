@@ -1,4 +1,4 @@
-# Copied from ma_explore (a5c2bd9) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (485a9b8) by scripts/sync_robot_package.sh: edit it there, not here.
 """Classic decentralized exploration policies, on the same observations as the
 learned policy (each robot uses only its own integrated map and what it knows
 about merged teammates). All commit to a goal until it is reached.

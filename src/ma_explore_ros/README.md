@@ -32,6 +32,21 @@ can relocalize; up to 2 attempts, then it stops and logs that it needs help
 recovery_back_m, recovery_speed, recovery_attempts. Every loss and recovery is a
 row of `<agent>_slam_events.csv`.
 
+## When the car is stuck
+
+If Nav2 aborts 3 goals within 40 s while the car moves less than 0.15 m, its
+costmaps hold obstacles all around it (in Isaac: teammates that drove close by
+stay marked beside and behind the car after they have left, since only the
+forward camera can erase a mark, and the car's Nav2 recoveries never clear the
+costmaps). The planner then (1) clears the local and global costmaps and
+decides again; (2) if it is stuck again within 2 min, retraces the last 0.3 m it
+drove (in reverse, or forwards if that stretch was driven in reverse: ground it
+has just driven over), clears again and decides; (3) otherwise logs that it
+needs help. Parameters: unstick, unstick_aborts, unstick_window, unstick_move,
+unstick_back, unstick_reset; test with unstick_test_at:=40.0 (acts as if stuck
+40 s and 55 s after the start). Events stuck_clear / stuck_backup / stuck_help
+go to `<agent>_slam_events.csv`.
+
 ## Policy
 
 `policy/policy.pt` (see policy/README.md). `ros2 run ma_explore_ros policy_info`

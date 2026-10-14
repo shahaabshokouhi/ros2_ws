@@ -1,4 +1,4 @@
-# Copied from ma_explore (a5c2bd9) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (485a9b8) by scripts/sync_robot_package.sh: edit it there, not here.
 """Load a trained actor for deployment, and export the slim file the robots use.
 
 A robot needs only the actor and the environment settings it was trained

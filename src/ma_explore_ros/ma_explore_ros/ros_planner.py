@@ -1,4 +1,4 @@
-# Copied from ma_explore (a5c2bd9) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (485a9b8) by scripts/sync_robot_package.sh: edit it there, not here.
 """ROS 2 planner for one robot: picks its next exploration goal and sends it to Nav2.
 
     python -m ma_explore.ros_planner --ros-args -p agent:=sim_1 -p agents:="sim_1 sim_2 sim_3" \\
@@ -44,7 +44,19 @@ mate: whose pose a revisit goes to) and a JSON message on
 pose_timeout s also counts as lost (after a loss ORB-SLAM3 tracks in a
 temporary map: tracking 'OK', but no pose until it is back in the main map);
 each loss and recovery is a row of <out>/<agent>_slam_events.csv (where, the
-heading, the goal and its bearing, how long). /ma_explore/<agent>/enable
+heading, the goal and its bearing, how long).
+Stuck car (unstick, a safety layer that does not change the policy): when
+`unstick_aborts` goals are aborted within `unstick_window` s while the car moved
+less than `unstick_move` m, Nav2's costmaps hold obstacles all around it -- in
+Isaac, teammates that drove close by stay marked beside and behind a car after
+they have left, because a mark is erased only when the forward camera sees the
+spot free again, and the car's Nav2 recoveries never clear the costmaps. Then:
+1. clear the local and global costmaps (the camera marks real obstacles again
+   at once), unblock the goals that failed meanwhile, and decide again;
+2. stuck again within `unstick_reset` s: back up `unstick_back` m along the path
+   just driven (known free; wheel odometry), clear again, decide;
+3. stuck again: log that it needs help; start over after `unstick_reset` s.
+Events 'stuck_clear', 'stuck_backup', 'stuck_help' go to <agent>_slam_events.csv. /ma_explore/<agent>/enable
 (std_msgs/Bool) switches exploring off (the goal is cancelled) and on.
 -p policy:= takes 'rl:<file>', a .pt file (checkpoint or robot_policy.pt) or a baseline name.
 
@@ -80,6 +92,7 @@ import torch
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PointStamped, TransformStamped, Twist
 from nav2_msgs.action import NavigateToPose
+from nav2_msgs.srv import ClearEntireCostmap
 from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.action import ActionClient
 from rcl_interfaces.msg import ParameterDescriptor
@@ -153,6 +166,16 @@ class Planner(Node):
         # the path driven before the loss backwards (needs wheel odometry consistent with SLAM).
         self.rec_mode = p('recovery_mode', 'straight')
         self.rec_test_at = p('recovery_test_at', -1.0)   # testing: pretend a loss this many s after the start
+        # stuck car (module docstring): clear the costmaps, then back up along the path driven, then ask for help
+        self.unstick_on = p('unstick', True)
+        self.unstick_aborts = int(p('unstick_aborts', 3))
+        self.unstick_window = p('unstick_window', 40.0)      # s
+        self.unstick_move = p('unstick_move', 0.15)          # m: moved less than this while the goals failed
+        self.unstick_back = p('unstick_back', 0.3)           # m backed up in step 2
+        self.unstick_reset = p('unstick_reset', 120.0)       # s: a later stuck spell starts again at step 1
+        self.unstick_test_at = p('unstick_test_at', -1.0)    # testing: act as if stuck this many s after the start
+        self.aborts = deque()                                 # (time, xy) of recent aborted goals
+        self.unstick = {'step': 0, 't': -1e9, 'bt': None}
         # close enough: a car within near_dist m of its goal for near_s s counts as there, even if Nav2 is
         # still manoeuvring to match the goal heading (a car cannot turn on the spot; Isaac, 13 October)
         self.near_dist = p('near_dist', 0.15)
@@ -237,6 +260,8 @@ class Planner(Node):
         self.tf = Buffer()
         self.tfl = TransformListener(self.tf, self)
         self.nav = ActionClient(self, NavigateToPose, f'/{self.me}/navigate_to_pose')
+        self.clear_srv = [self.create_client(ClearEntireCostmap, f'/{self.me}/{c}_costmap/clear_entirely_{c}_costmap')
+                          for c in ('local', 'global')]
 
         self.goal = None              # (x, y) in my map_nav, None = no goal
         self.goal_yaw = None          # heading at a revisit pose, else None
@@ -260,6 +285,7 @@ class Planner(Node):
                            'n_candidates', 'merged_with', 'decide_ms', 'reason', 'goal_yaw', 'kind', 'mate'])
         self.create_timer(0.5, self.tick)
         self.create_timer(0.1, self.recovery_tick)
+        self.create_timer(0.1, self.unstick_tick)
         self.get_logger().info(f'{self.me}: planner "{policy}" ({"learned" if learned else "rule-based"}) on {device}, '
                                f'team {self.agents}; goal stand-off {self.decider.cfg.goal_standoff * 0.1:.1f} m, '
                                f'goal clearance {self.decider.goal_clearance * 0.1:.1f} m, escape radius '
@@ -493,6 +519,13 @@ class Planner(Node):
             self.goal, self.goal_yaw, self.paused_until, self.next_ok = None, None, None, now
             self.publish_goal()
         if not self.enabled:
+            return
+        if self.unstick['bt'] is not None:          # backing up out of a stuck spot (unstick_tick drives)
+            return
+        if (self.unstick_test_at > 0 and self.t_start is not None and now - self.t_start > self.unstick_test_at):
+            self.unstick_test_at = -1.0 if self.unstick['step'] >= 1 else self.unstick_test_at + 15.0
+            self.get_logger().warn(f'{self.me}: unstick test: acting as if stuck')
+            self.unstuck(now, test=True)
             return
         xy = self.pose[self.me][:2]
         if self.goal is not None and self.paused_until is None and math.dist(xy, self.goal) < self.near_dist:
@@ -802,9 +835,114 @@ class Planner(Node):
 
     def fail(self, goal, why):
         self.get_logger().info(f'{self.me}: goal ({goal[0]:.2f}, {goal[1]:.2f}) {why}; blocked for {self.block_time:.0f} s')
-        self.blocked.append((goal[0], goal[1], time.monotonic() + self.block_time, 0.3, 'failed'))
+        now = time.monotonic()
+        self.blocked.append((goal[0], goal[1], now + self.block_time, 0.3, 'failed'))
         self.goal = None
         self.publish_goal()
+        if self.unstick_on and self.me in self.pose:
+            xy = self.pose[self.me][:2]
+            self.aborts.append((now, xy))
+            while self.aborts and now - self.aborts[0][0] > self.unstick_window:
+                self.aborts.popleft()
+            if (len(self.aborts) >= self.unstick_aborts
+                    and all(math.dist(a[1], xy) < self.unstick_move for a in self.aborts)):
+                self.unstuck(now)
+
+    # ── stuck car: costmaps walled in (module docstring) ──────────────────
+    def clear_costmaps(self):
+        for c in self.clear_srv:
+            if c.service_is_ready():
+                c.call_async(ClearEntireCostmap.Request())
+            else:
+                self.get_logger().warn(f'{self.me}: costmap clearing service {c.srv_name} not available')
+
+    def unstuck(self, now, test=False):
+        u, first = self.unstick, (self.aborts[0][0] if self.aborts else now)
+        if self.goal_handle is not None and self.goal is not None:   # Nav2 must not drive meanwhile
+            self.goal_seq += 1                                         # (the cancel is not a failure)
+            self.goal_handle.cancel_goal_async()
+            self.goal = None
+            self.publish_goal()
+        if now - u['t'] > self.unstick_reset:
+            u['step'] = 0
+        u['step'] += 1
+        u['t'] = now
+        n = len(self.aborts)
+        self.aborts.clear()
+        what = 'test' if test else f'{n} goals aborted in {now - first:.0f} s without moving'
+        # the goals that failed while stuck failed because of the walls, not because of where they are
+        self.blocked = [b for b in self.blocked if not (b[4] == 'failed' and b[2] - self.block_time >= first - 1.0)]
+        if u['step'] == 1:
+            self.clear_costmaps()
+            self.slam_event('stuck_clear', 0.0)
+            self.get_logger().warn(f'{self.me}: stuck ({what}): cleared the costmaps')
+        elif u['step'] == 2:
+            bt = self.path_back(self.unstick_back)
+            if bt is None:
+                self.clear_costmaps()
+                self.slam_event('stuck_clear', 0.0)
+                self.get_logger().warn(f'{self.me}: stuck again ({what}); no path to back up along '
+                                       '(no wheel odometry or no path driven): cleared the costmaps again')
+                return
+            u.update(bt=bt, t_drive=now, check=(now, self.wheel_hist[-1][1:3]))
+            self.slam_event('stuck_backup', 0.0)
+            self.get_logger().warn(f'{self.me}: stuck again ({what}): retracing {bt.length:.2f} m of the path driven '
+                                   f'({"forwards: it was driven in reverse" if bt.sign > 0 else "in reverse"}), '
+                                   'then clearing the costmaps')
+        else:
+            self.slam_event('stuck_help', 0.0)
+            self.get_logger().error(f'{self.me}: still stuck ({what}) after clearing the costmaps and backing up: '
+                                    f'needs help (trying again after {self.unstick_reset:.0f} s)')
+
+    def path_back(self, back_m):
+        """A BackTrack over the last back_m metres driven, from where the car is now, or None."""
+        now = time.monotonic()
+        if not self.wheel_hist or now - self.wheel_hist[-1][0] > 0.5 or len(self.slam_hist) < 3:
+            return None
+        hist = list(self.slam_hist)
+        path, dist = [hist[-1]], 0.0
+        for h in reversed(hist[:-1]):
+            dist += math.hypot(h[1] - path[-1][1], h[2] - path[-1][2])
+            path.append(h)
+            if dist >= back_m:
+                break
+        if len(path) < 3:
+            return None
+        here = (*self.pose[self.me][:2], self.pose[self.me][2])
+        pts, wheel = [(h[1], h[2], h[3]) for h in reversed(path)], self.wheel_hist[-1][1:]
+        bt = BackTrack(pts, here, wheel, speed=self.rec_speed)
+        bt.sync(wheel)
+        if bt.target_in_front(wheel):        # the last stretch was driven in reverse (a Nav2 manoeuvre):
+            bt = BackTrack(pts, here, wheel, speed=self.rec_speed, forward=True)   # retrace it forwards
+            bt.sync(wheel)
+        return bt
+
+    def unstick_tick(self):
+        u = self.unstick
+        if u['bt'] is None:
+            return
+        now = time.monotonic()
+        w = self.wheel_hist[-1] if self.wheel_hist else None
+        if self.lost_since is not None or w is None or now - w[0] > 0.5:
+            self.stop_car()
+            u['bt'] = None
+            self.get_logger().warn(f'{self.me}: back-up out of the stuck spot stopped (tracking lost or no wheel odometry)')
+            return
+        v, wz, done = u['bt'].command(w[1:])
+        t0, xy0 = u['check']
+        blocked = now - t0 > 3.0 and math.dist(xy0, w[1:3]) < 0.03
+        if now - t0 > 3.0:
+            u['check'] = (now, w[1:3])
+        if done or blocked or now - u['t_drive'] > 3.0 * self.unstick_back / max(self.rec_speed, 1e-3):
+            self.stop_car()
+            self.get_logger().info(f"{self.me}: retraced {u['bt'].driven:.2f} m"
+                                   f"{' (blocked)' if blocked else ''}; clearing the costmaps and deciding again")
+            u['bt'] = None
+            self.clear_costmaps()
+            return
+        cmd = Twist()
+        cmd.linear.x, cmd.angular.z = float(v), float(wz)
+        self.cmd_pub.publish(cmd)
 
     def publish_goal(self):
         m = PointStamped()

@@ -1,4 +1,4 @@
-# Copied from ma_explore (a5c2bd9) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (485a9b8) by scripts/sync_robot_package.sh: edit it there, not here.
 """Back-tracking after a SLAM tracking loss (pure geometry, no ROS).
 
 When tracking is lost the car drives back, slowly and in reverse, along the
@@ -33,15 +33,26 @@ class BackTrack:
     """Follow `path_map` (list of (x, y, yaw), oldest first, ending at the pose
     where tracking was lost) backwards, from the newest point to the oldest."""
 
-    def __init__(self, path_map, slam_at_loss, wheel_at_loss, speed=0.1, lookahead=0.25, min_radius=0.3):
+    def __init__(self, path_map, slam_at_loss, wheel_at_loss, speed=0.1, lookahead=0.25, min_radius=0.3,
+                 forward=False):
         T = se2(*wheel_at_loss) @ np.linalg.inv(se2(*slam_at_loss))
         P = np.array([[p[0], p[1], 1.0] for p in path_map]) @ T.T
         self.path = P[::-1, :2]                       # newest (the loss) first
         self.length = float(np.linalg.norm(np.diff(self.path, axis=0), axis=1).sum()) if len(self.path) > 1 else 0.0
         self.speed, self.lookahead, self.min_radius = speed, lookahead, min_radius
+        self.sign = 1.0 if forward else -1.0          # forward: retrace a path that was driven in reverse
         self.i = 0                                    # progress along the path (never goes back)
         self.start = None
         self.driven = 0.0
+
+    def target_in_front(self, wheel_pose):
+        """Is the first look-ahead point in front of the car (the path was driven in reverse)?"""
+        x, y, yaw = wheel_pose
+        d = np.linalg.norm(self.path - np.array([x, y]), axis=1)
+        ahead = np.nonzero(d[self.i:] >= self.lookahead)[0]
+        j = self.i + int(ahead[0]) if len(ahead) else len(self.path) - 1
+        gx, gy = self.path[j]
+        return math.cos(yaw) * (gx - x) + math.sin(yaw) * (gy - y) > 0.05
 
     def sync(self, wheel_pose):
         """Start the progress at the path point nearest the car (a later attempt starts part-way back)."""
@@ -69,9 +80,9 @@ class BackTrack:
         gx, gy = self.path[j]
         c, s = math.cos(yaw), math.sin(yaw)
         xr, yr = c * (gx - x) + s * (gy - y), -s * (gx - x) + c * (gy - y)     # target in the car frame
-        if xr > 0.05:                                 # the target is in front: the path is behind us already
+        if self.sign * xr < -0.05:                    # the target is on the wrong side: the path is done
             return 0.0, 0.0, True
         d2 = max(xr * xr + yr * yr, 1e-6)
         k = max(-1.0 / self.min_radius, min(1.0 / self.min_radius, 2.0 * yr / d2))
-        v = -self.speed
+        v = self.sign * self.speed
         return v, v * k, False
