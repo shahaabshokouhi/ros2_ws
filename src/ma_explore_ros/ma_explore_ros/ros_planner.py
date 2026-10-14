@@ -1,4 +1,4 @@
-# Copied from ma_explore (485a9b8) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (28e04f5) by scripts/sync_robot_package.sh: edit it there, not here.
 """ROS 2 planner for one robot: picks its next exploration goal and sends it to Nav2.
 
     python -m ma_explore.ros_planner --ros-args -p agent:=sim_1 -p agents:="sim_1 sim_2 sim_3" \\
@@ -28,10 +28,25 @@ real robot with run_slam3.sh --nav). The policy's team size (the training
 config's n_agents) is kept: robots that are not there count as never merged, so
 one robot alone explores as a robot does before its first merge.
 
-When it decides (like a training step = 0.8 m of driving):
+When it decides: `decide_on` 'distance' (as policies trained with a decision
+every step, env event_decisions off):
   * no goal (start, reached, failed), or
   * driven `decide_dist` m since the last decision, or
   * `decide_period` s since the last decision.
+'events' (env event_decisions; 'auto', the default, takes the policy's own):
+it asks only when something happens, and otherwise drives on to its goal:
+  * no goal (start, reached, failed), after WAIT, or
+  * a frontier goal used up: the unknown around its frontier (checked every
+    `event_check_s` s) has fallen below goal_left x what it was when chosen, or
+  * a new merge while heading to a frontier, or
+  * trip_max_steps training steps (x 8 ticks x tick_s) on one goal, or
+  * no progress: Nav2's distance remaining along its path (straight-line
+    distance before its first feedback) has not shrunk by `progress_m` m in
+    `progress_s` s, more than 0.4 m from the goal. The goal then counts as
+    failed (blocked, as an abort). Nav2 itself gives up on an unreachable goal
+    only after ~50 s of recoveries (Isaac, 14 October); training's "no path"
+    ends such a trip at once.
+Revisit and loop goals are driven to the end (reached, failed, or the long trip).
 Action 0 keeps the current goal (or stays when there is none, then asks again
 after `stay_wait` s). A goal Nav2 rejects, aborts or reaches is blocked for
 `block_time` s (candidates within 0.3 m of it are masked): a frontier the car
@@ -141,8 +156,12 @@ class Planner(Node):
         self.agents = p('agents', 'sim_1 sim_2 sim_3').split()
         policy = p('policy', 'coordinated')
         device = p('device', 'cpu')
+        self.decide_on = p('decide_on', 'auto')        # auto | events | distance (module docstring)
         self.decide_dist = p('decide_dist', 0.8)
         self.decide_period = p('decide_period', 8.0)
+        self.event_check_s = p('event_check_s', 2.0)
+        self.progress_s = p('progress_s', 20.0)       # events: no progress for this long = the goal failed
+        self.progress_m = p('progress_m', 0.25)
         self.stay_wait = p('stay_wait', 2.0)
         self.block_time = p('block_time', 60.0)
         self.merge_fresh = p('merge_fresh', 6.0)
@@ -207,6 +226,11 @@ class Planner(Node):
         learned = policy.startswith('rl:') or policy.endswith('.pt')     # on the robots: a plain policy file
         gc = (0.0 if learned else 0.25) if gc < 0 else gc
         self.decider = Decider(pol, env_cfg, self.team, H, device, goal_clearance=math.ceil(round(gc / 0.1, 6)))
+        if self.decide_on == 'auto':
+            self.decide_on = 'events' if env_cfg.event_decisions else 'distance'
+        assert self.decide_on in ('events', 'distance'), self.decide_on
+        self.trip_max_s = env_cfg.trip_max_steps * env_cfg.ticks * env_cfg.tick_s
+        self.goal_left = env_cfg.goal_left
         self.policy_name = policy
         # warm up (the first call compiles the path-distance kernel)
         t0 = time.perf_counter()
@@ -264,6 +288,13 @@ class Planner(Node):
                           for c in ('local', 'global')]
 
         self.goal = None              # (x, y) in my map_nav, None = no goal
+        self.goal_kind = ''           # frontier, revisit, loop (what the goal is for)
+        self.goal_front, self.front_gain0 = None, 0.0   # a frontier goal's frontier cell, unknown around it then
+        self.goal_t0 = 0.0            # when the goal was set (or kept at an event)
+        self.merge_event = False      # a new merge since the last decision
+        self.nav_left = None          # Nav2's distance remaining to the current goal (feedback)
+        self.best_left, self.best_t = math.inf, 0.0   # least distance left so far, and when it last shrank
+        self.last_check = 0.0
         self.goal_yaw = None          # heading at a revisit pose, else None
         self.goal_handle = None
         self.goal_seq = 0
@@ -289,7 +320,8 @@ class Planner(Node):
         self.get_logger().info(f'{self.me}: planner "{policy}" ({"learned" if learned else "rule-based"}) on {device}, '
                                f'team {self.agents}; goal stand-off {self.decider.cfg.goal_standoff * 0.1:.1f} m, '
                                f'goal clearance {self.decider.goal_clearance * 0.1:.1f} m, escape radius '
-                               f'{self.decider.env.escape_cells * 0.1:.1f} m, recovery {self.rec_mode if self.rec_on else "off"}')
+                               f'{self.decider.env.escape_cells * 0.1:.1f} m, recovery {self.rec_mode if self.rec_on else "off"}, '
+                               f'decides on {self.decide_on}')
 
     @staticmethod
     def revisit_first(pol, cfg):
@@ -337,6 +369,7 @@ class Planner(Node):
         if m.child_frame_id in self.others:
             if m.child_frame_id not in self.merge:
                 self.last_new_merge_t = time.monotonic()     # a map correction now is the merge, not a loop
+                self.merge_event = True
             self.merge[m.child_frame_id] = (T_of(m.transform), time.monotonic())
 
     def on_metrics(self, m):
@@ -549,6 +582,8 @@ class Planner(Node):
             return
         if self.goal is None:
             reason = 'no goal' if now >= self.next_ok else None
+        elif self.decide_on == 'events':
+            reason = self.event(now)
         elif self.last_xy is not None and math.dist(xy, self.last_xy) >= self.decide_dist:
             reason = 'drove'
         elif now - self.last_t >= self.decide_period:
@@ -557,6 +592,33 @@ class Planner(Node):
             reason = None
         if reason:
             self.decide(reason)
+
+    def event(self, now):
+        """Event decisions, while driving to a goal: the reason to ask the policy now, or None."""
+        frontier = self.goal_kind == 'frontier'
+        xy = self.pose[self.me][:2]
+        straight = math.dist(xy, self.goal)
+        left = self.nav_left if self.nav_left is not None else straight
+        if left < self.best_left - self.progress_m:
+            self.best_left, self.best_t = left, now
+        elif now - self.best_t >= self.progress_s and straight > 0.4:
+            g = self.goal
+            if self.goal_handle is not None:
+                self.goal_seq += 1                          # the cancel is not Nav2's abort
+                self.goal_handle.cancel_goal_async()
+            self.fail(g, f'made no progress for {self.progress_s:.0f} s ({left:.2f} m left)')
+            return 'no progress' if self.unstick['bt'] is None else None    # not while backing out of a stuck spot
+        if self.merge_event and frontier:
+            return 'merge'
+        if now - self.goal_t0 >= self.trip_max_s:
+            return 'long trip'
+        if frontier and self.goal_front is not None and now - self.last_check >= self.event_check_s:
+            self.last_check = now
+            robots = [self.robot(self.me)] + [self.robot(a) for a in self.others]
+            left = self.decider.unknown_near(robots, self.goal_front)
+            if left is not None and left < self.goal_left * self.front_gain0:
+                return 'frontier seen'
+        return None
 
     def decide(self, reason):
         now = time.monotonic()
@@ -587,6 +649,15 @@ class Planner(Node):
             self.stall_saved = False
         x, y, yaw = self.pose[self.me]
         merged = [a for a, r in zip(self.others, robots[1:]) if r.known]
+        self.merge_event = False
+        if res['goal'] is not None:            # what the new goal is for (event decisions)
+            self.goal_kind, self.goal_t0 = res['kind'], now
+            self.goal_front, self.front_gain0 = res.get('front'), res.get('front_gain', 0.0)
+        elif res['keep'] and self.goal is not None:      # kept at an event: count again from now
+            self.goal_t0 = now
+            if self.goal_kind == 'frontier' and self.goal_front is not None:
+                left = self.decider.unknown_near(robots, self.goal_front)
+                self.front_gain0 = self.front_gain0 if left is None else left
         self.publish_known(res)
         paused, self.paused_until = self.paused_until is not None, None
         if res['goal'] is not None:
@@ -800,8 +871,15 @@ class Planner(Node):
         else:
             yaw = math.atan2(goal[1] - y, goal[0] - x)
         msg.pose.pose.orientation.z, msg.pose.pose.orientation.w = math.sin(yaw / 2), math.cos(yaw / 2)
-        self.nav.send_goal_async(msg).add_done_callback(lambda f: self.on_accepted(f, seq, goal))
+        self.nav_left, self.best_left, self.best_t = None, math.inf, time.monotonic()   # progress watch from now
+        self.nav.send_goal_async(msg, feedback_callback=lambda fb: self.on_feedback(fb, seq)).add_done_callback(
+            lambda f: self.on_accepted(f, seq, goal))
         self.publish_goal()
+
+    def on_feedback(self, fb, seq):
+        if seq == self.goal_seq:
+            d = float(fb.feedback.distance_remaining)
+            self.nav_left = d if d > 0.0 else None          # 0 before Nav2 has a path
 
     def on_accepted(self, fut, seq, goal):
         h = fut.result()

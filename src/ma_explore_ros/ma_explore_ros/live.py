@@ -1,4 +1,4 @@
-# Copied from ma_explore (485a9b8) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (28e04f5) by scripts/sync_robot_package.sh: edit it there, not here.
 """Decisions from live maps: the bridge between a running robot and the policy.
 
 No ROS here, so it can be tested on its own. A robot's planner (ros_planner.py)
@@ -235,6 +235,7 @@ class Decider:
                     e.gedge[0, 0, a, b] += 1.0
                     e.gedge[0, 0, b, a] += 1.0
         e.t[0] = min(int(t), self.cfg.max_steps - 1)
+        e.ask[0] = True                       # the planner asks at its events (event decisions): a free choice
         obs = e.observe()
         if self.goal_clearance > 0:
             # Nav2 cannot plan to a goal inside its obstacle inflation (0.25 m for the car): new goals
@@ -274,5 +275,29 @@ class Decider:
                 'goal_yaw': None if (keep or wait or math.isnan(yaw)) else yaw,
                 # the heading it arrives with along its shortest path (for a frontier goal's Nav2 heading)
                 'arrive_yaw': float(e.cand_arrive[0, 0, a]),
+                # the frontier cell a frontier goal is for, and the share of the sensor disk unknown around it
+                # (the planner's event "frontier used up": unknown_near)
+                'front': tuple(win.to_xy(e.cand_front[0, 0, a].cpu().numpy())),
+                'front_gain': float(e.cand_gain[0, 0, a]),
                 'candidates': win.to_xy(cand[mask]), 'n_candidates': int(mask[1:].sum()), 'offered': offered,
                 'window': win, 'obs': obs, 'ms': 1e3 * (time.perf_counter() - t0)}
+
+    def unknown_near(self, robots, xy):
+        """The share of the sensor disk around xy (m) that is unknown in the deciding
+        robot's integrated map (its own map and merged teammates'), as training
+        measures a frontier goal (ExploreEnv.cand_gain). None if xy is off the map window."""
+        known = [r for r in robots if r.known]
+        pts = np.concatenate([np.concatenate([r.free_pts, r.occ_pts]) for r in known] + [np.zeros((0, 2))])
+        win = Window.around(pts, self.H, self.H)
+        seen = np.zeros((self.H, self.H), bool)
+        for r in known:
+            f, o = rasterize(win, r.free_pts, r.occ_pts)
+            seen |= f | o
+        rc, ok = win.to_cell(np.array([xy], float))
+        if not ok[0]:
+            return None
+        k = self.env.ig_kernel.cpu().numpy() > 0
+        rad = k.shape[0] // 2
+        unk = np.pad(~seen, rad)                      # off the window counts as known, as in training
+        y, x = rc[0]
+        return float((unk[y:y + 2 * rad + 1, x:x + 2 * rad + 1] & k).sum() / self.env.ig_norm)

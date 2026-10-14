@@ -1,4 +1,4 @@
-# Copied from ma_explore (485a9b8) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (28e04f5) by scripts/sync_robot_package.sh: edit it there, not here.
 """Batched multi-robot exploration environment on the GPU.
 
 B environments x N robots step together. Each robot has its OWN map (what it
@@ -15,7 +15,10 @@ integrated map (index 0 = keep the current goal, or stay if there is none;
 1.. = frontier cells with the most unknown space in sensor range, spread out),
 then the robots drive `ticks` cells along shortest paths on the true map (the
 stand-in for Nav2), sensing after every cell. Robots that reach their goal wait
-for the next decision.
+for the next decision. With event_decisions a robot chooses only at an event
+(no goal, goal failed, its frontier seen, a new merge, a long trip; see
+EnvConfig) and otherwise drives on: its only option is KEEP, and such steps do
+not train the actor (mappo: steps with a real choice).
 
 Reward per step, one per robot (shape B x N):
     w_team * gain in team coverage (union of all robots' own maps)
@@ -177,6 +180,16 @@ class EnvConfig:
     end_at_success: bool = True
     w_end_merged: float = 0.0
     w_end_unc: float = 0.0
+    # when a robot decides. False: every step (0.8 m driven); KEEP is one of its choices, so it can switch
+    # goals at any step. True (event decisions): only at an event; between events it drives on to its goal
+    # (KEEP is its only option, and the step is not a decision for learning). Events: no goal (start,
+    # reached, after WAIT), the goal failed (no path), a frontier goal used up (the unknown around its
+    # frontier has fallen below goal_left x what it was when chosen: the robot or a teammate has seen it),
+    # a new merge (frontier goals only), or trip_max_steps steps on one goal. Revisit and loop goals are
+    # driven to the end: their purpose is the view at the goal.
+    event_decisions: bool = False
+    goal_left: float = 0.3
+    trip_max_steps: int = 15
     # ── stage 2: SLAM and compute state (off = stage 1, unchanged) ──
     slam_model: bool = False
     tick_s: float = 0.67           # seconds per tick (0.1 m at 0.15 m/s)
@@ -297,6 +310,16 @@ class ExploreEnv:
         self.team_cov = torch.zeros(B, device=d)
         self.know_cov = torch.zeros(B, device=d)
         self.waiting = torch.zeros(B, N, dtype=torch.bool, device=d)
+        # event decisions: who decides at the next observe(), what each goal is for and how it is going
+        self.ask = torch.ones(B, N, dtype=torch.bool, device=d)              # an event since the last step
+        self.ask_now = torch.ones(B, N, dtype=torch.bool, device=d)          # deciding now (set by observe)
+        self.goal_kind = torch.zeros(B, N, dtype=torch.long, device=d)       # 0 none, 1 frontier, 2 revisit, 3 loop
+        self.goal_front = torch.zeros(B, N, 2, dtype=torch.long, device=d)   # the frontier cell of a frontier goal
+        self.goal_gain0 = torch.zeros(B, N, device=d)                        # unknown around it when chosen
+        self.goal_left_now = torch.zeros(B, N, device=d)                     # ... and now (observe)
+        self.trip = torch.zeros(B, N, dtype=torch.long, device=d)            # steps on the current goal
+        self.choices = torch.zeros(B, N, device=d)                           # real decisions this mission
+        self.goals_set = torch.zeros(B, N, device=d)                         # new goals this mission
         if self.cfg.slam_model:
             self.backlog = torch.zeros(B, N, device=d)
             self.drift = torch.zeros(B, N, device=d)
@@ -408,6 +431,11 @@ class ExploreEnv:
         self.dist[idx] = 0
         self.t90[idx] = -1
         self.waiting[idx] = False
+        self.ask[idx] = True
+        self.goal_kind[idx] = 0
+        self.trip[idx] = 0
+        self.choices[idx] = 0
+        self.goals_set[idx] = 0
         if c.slam_model:
             for name in ('backlog', 'drift', 'since_corr', 'links', 'step_lost', 'step_links', 'step_drift'):
                 getattr(self, name)[idx] = 0
@@ -612,6 +640,22 @@ class ExploreEnv:
         go = a >= n_fixed
         self.waiting = (a == 1) if n_fixed == 2 else torch.zeros_like(go)
         change = go | (~self.has_goal & ~self.waiting)
+        self.choices += (self.cand_mask.sum(-1) > 1).float()           # steps with a real choice
+        self.goals_set += go.float()
+        if c.event_decisions:
+            # what the new goal is for (its slot), and how much unknown its frontier had; a robot that was
+            # asked and kept its goal starts counting again from now
+            n_rev = c.n_revisit if c.slam_model else 0
+            n_own = c.n_self_revisit if self.graph else 0
+            kind = torch.where(a < n_fixed + n_rev, 2, torch.where(a < n_fixed + n_rev + n_own, 3, 1))
+            kept = self.ask_now & (a == 0)
+            self.goal_kind = torch.where(go, kind, torch.where(change, 0, self.goal_kind))
+            front = torch.gather(self.cand_front, 2, a[..., None, None].expand(B, N, 1, 2)).squeeze(2)
+            self.goal_front = torch.where(go[..., None], front, self.goal_front)
+            gain0 = torch.gather(self.cand_gain, 2, a[..., None]).squeeze(-1)
+            self.goal_gain0 = torch.where(go, gain0, torch.where(kept, self.goal_left_now, self.goal_gain0))
+            self.trip = torch.where(go | kept, torch.zeros_like(self.trip), self.trip)
+            merged_before = self.merged.clone()
         self.goal = torch.where(change[..., None], new, self.goal)
         self.has_goal = self.has_goal | go
         here = go & (self.goal == self.pos).all(-1)                        # a new goal where the robot stands
@@ -658,6 +702,14 @@ class ExploreEnv:
             if c.slam_model:
                 self._slam_tick(moving, steplen, turn, new_cells)
         self._merge()
+        if c.event_decisions:
+            # events for the next step: WAIT lasts one step; no path to the goal; a new merge while
+            # heading to a frontier; a long trip. (No goal, and a used-up frontier: observe().)
+            self.trip += 1
+            bi_, ni_ = torch.arange(B, device=self.dev)[:, None], torch.arange(N, device=self.dev)[None]
+            no_path = self.has_goal & (self.goal_field[bi_, ni_, self.pos[..., 0], self.pos[..., 1]] >= G.INF)
+            new_merge = (self.merged & ~merged_before).any(2) & (self.goal_kind == 1)
+            self.ask = self.waiting | no_path | new_merge | (self.trip >= c.trip_max_steps)
         if c.slam_model:
             # map data arriving from teammates, and the place-recognition burst of a new merge
             gap = self._known_count(integrated=True) - self._known_count(integrated=False)
@@ -694,7 +746,8 @@ class ExploreEnv:
         info = {'done_team_cov': self.team_cov[done], 'done_know_cov': self.know_cov[done],
                 'done_steps': self.t[done], 'done_t90': self.t90[done], 'done_success': self.ever_success[done],
                 'done_dist': self.dist[done].mean(1), 'done_merged': self.merged[done].float().mean((1, 2)),
-                'done_map': self.map_idx[done]}
+                'done_map': self.map_idx[done], 'done_choices': self.choices[done].mean(1),
+                'done_goals': self.goals_set[done].mean(1)}
         if c.slam_model:
             info.update({'done_drift': self.drift[done].mean(1), 'done_links': self.links[done].sum((1, 2)),
                          'done_backlog': self.backlog[done].mean(1)})
@@ -1111,6 +1164,18 @@ class ExploreEnv:
                                    + ([rok] if n_rev else []) + ([ook] if n_own else []) + [ok], 2)
         if n_fixed == 2:          # with a WAIT action, "keep" without a goal (= stand still) is WAIT's job
             self.cand_mask[..., 0] &= self.has_goal
+        # unknown around each slot's frontier cell (a frontier goal's purpose), and around the current goal's
+        bk = torch.arange(B, device=d)[:, None, None]
+        nk = torch.arange(N, device=d)[None, :, None]
+        self.cand_gain = ig[bk, nk, self.cand_front[..., 0], self.cand_front[..., 1]] / self.ig_norm
+        if c.event_decisions:
+            # deciding now: an event since the last step, no goal, or a frontier goal used up; the others
+            # drive on (KEEP is their only option)
+            gy, gx = self.goal_front[..., 0], self.goal_front[..., 1]
+            self.goal_left_now = ig[bk[..., 0], nk[..., 0], gy, gx] / self.ig_norm
+            used = (self.goal_kind == 1) & self.has_goal & (self.goal_left_now < c.goal_left * self.goal_gain0)
+            self.ask_now = self.ask | used | ~self.has_goal
+            self.cand_mask[..., 1:] &= self.ask_now[..., None]
         K = c.n_candidates
         # the heading a robot arrives with: the direction of the last step of its shortest path to the goal
         # (the live planner gives it to Nav2, so the car does not turn on the spot at a goal)
