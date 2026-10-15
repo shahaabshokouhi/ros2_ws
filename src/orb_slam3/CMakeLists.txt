@@ -24,7 +24,7 @@ find_package(tf2_ros REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(message_filters REQUIRED)
-find_package(orbslam2_msgs REQUIRED)
+find_package(orbslam3_msgs REQUIRED)
 find_package(Boost REQUIRED COMPONENTS serialization)
 find_package(OpenSSL REQUIRED)
 
@@ -128,7 +128,7 @@ ament_target_dependencies(
   cv_bridge
   image_transport
   message_filters
-  orbslam2_msgs
+  orbslam3_msgs
 )
 
 target_link_libraries(orb_slam3_node

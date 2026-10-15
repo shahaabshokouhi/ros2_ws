@@ -1,11 +1,20 @@
 #!/bin/bash
-# Drive ONE robot from this computer's keyboard and watch it in RViz.
-# Single-robot tests only. On the robot run:  ./run_slam3.sh --teleop [--grid]
+# PC (station). Drive ONE robot from this computer's keyboard and watch it in RViz (opens
+# run_rviz.sh in the background; the keys are listed when it starts). Ctrl-C stops the
+# robot and closes both. Robot side: ./run_slam.sh --teleop [--grid]
+# (simulation: ./run_sim_slam.sh --teleop).
 #
-#   ./run_teleop.sh AGENT [ros2 parameters, e.g. speed:=0.1]
+#   ./run_teleop.sh AGENT [PARAM:=VALUE ...]
 #
-# RViz opens in the background; this terminal reads the keyboard (keys are
-# listed when it starts). Ctrl-C stops the robot and closes both.
+#   AGENT          the robot's agent name
+#   PARAM:=VALUE   keyboard node parameters: speed (default 0.15 m/s), turn (0.8 rad/s),
+#                  max_linear (0.3), max_angular (1.5), hold_timeout (0.7 s), latch (false)
+#
+# Examples:
+#   ./run_teleop.sh agent_2
+#   ./run_teleop.sh agent_2 speed:=0.1
+#   ROS_DOMAIN_ID=31 ./run_teleop.sh sim     the single simulated car
+if [[ "$1" == -h || "$1" == --help ]]; then awk 'NR>1{if(!/^#/)exit; sub(/^# ?/,""); print}' "$0"; exit 0; fi
 AGENT="$1"
 if [ -z "$AGENT" ]; then echo "usage: $0 AGENT [param:=value ...]"; exit 1; fi
 shift

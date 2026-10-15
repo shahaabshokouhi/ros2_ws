@@ -1,4 +1,4 @@
-# Copied from ma_explore (fbdfb24) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (6789422+changes) by ma_explore.robot_package: edit it there, not here.
 """Decisions from live maps: the bridge between a running robot and the policy.
 
 No ROS here, so it can be tested on its own. A robot's planner (ros_planner.py)
@@ -276,6 +276,27 @@ class Decider:
                     th_j[flat[last]] = tp[ok][last, 2]
                 e.trail_tick[0, j] = torch.as_tensor(tt_j.reshape(H, W), device=d)
                 e.trail_head[0, j] = torch.as_tensor(th_j.reshape(H, W), device=d)
+        if e.paths:
+            # revisit paths (env revisit_path): each robot's cell at every tick and its motion up to then
+            # (cells driven), from the path it drove; beyond now: MOVE_END
+            now = min(int(e.tick[0]), e.TT - 1)
+            ticks = np.arange(e.TT)
+            e.path_log[0] = 0
+            e.move_log[0] = e.MOVE_END
+            for j, r in enumerate(robots):
+                tp = np.asarray(r.trail_pose, np.float64).reshape(-1, 4) if (r.known or j == 0) else np.zeros((0, 4))
+                if not len(tp):
+                    e.moved[0, j] = 0
+                    continue
+                tp = tp[np.argsort(tp[:, 3], kind='stable')]
+                upto = ticks[:now + 1]
+                k = np.clip(np.searchsorted(tp[:, 3], upto, side='right') - 1, 0, len(tp) - 1)
+                rc, _ = win.to_cell(tp[k, :2])
+                rc = np.clip(rc, 0, [H - 1, W - 1])
+                mv = np.minimum(cells_driven(tp, upto).astype(np.int64), e.MOVE_END - 1)
+                e.path_log[0, j, :now + 1] = torch.as_tensor(rc.astype(np.int16), device=d)
+                e.move_log[0, j, :now + 1] = torch.as_tensor(mv.astype(np.int16), device=d)
+                e.moved[0, j] = int(mv[-1])
         if e.graph and e.node_at is not None:
             # nodes by each robot's own motion: its node at every tick, from the path it drove
             now = int(e.tick[0])
@@ -324,6 +345,13 @@ class Decider:
                 else 'loop' if nf0 + n_rev <= a < nf0 + n_rev + n_own else 'frontier')
         mate = int(e.cand_mate[0, 0, a])
         nf = e.n_fixed()
+        waypoints = None
+        if e.paths and kind in ('revisit', 'loop'):
+            # the poses of the old path, in order, each with the heading along it (to the next pose; the
+            # first: the heading the robot had there)
+            wp = win.to_xy(e.cand_wp[0, 0, a].cpu().numpy())
+            yaws = [yaw] + [math.atan2(wp[k][1] - wp[k - 1][1], wp[k][0] - wp[k - 1][0]) for k in range(1, len(wp))]
+            waypoints = [(float(p[0]), float(p[1]), float(y)) for p, y in zip(wp, yaws)]
         slot_kind = lambda k: ('revisit' if nf <= k < nf + n_rev else 'loop' if k < nf + n_rev + n_own  # noqa: E731
                                else 'frontier')
         xy_all = win.to_xy(cand)
@@ -332,6 +360,8 @@ class Decider:
                 'mate': mate if (kind == 'revisit' and mate > 0) else None,
                 'goal': None if (keep or wait) else tuple(win.to_xy(cand[a])),
                 'goal_yaw': None if (keep or wait or math.isnan(yaw)) else yaw,
+                # a revisit path (env revisit_path): [(x, y, yaw)] to drive in order, then wait for the correction
+                'waypoints': waypoints,
                 # the heading it arrives with along its shortest path (for a frontier goal's Nav2 heading)
                 'arrive_yaw': float(e.cand_arrive[0, 0, a]),
                 # the frontier cell a frontier goal is for, and the share of the sensor disk unknown around it

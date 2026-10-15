@@ -42,23 +42,27 @@ need first.
 
 | I want to… | On the robot | On the PC |
 |---|---|---|
-| Run SLAM on one robot | `./run_slam3.sh` | `./run_rviz.sh <agent>` to watch |
-| Run the multi-robot keyframe-sharing method (the research method) | `./run_slam3.sh` (the default, same as `--method new`) on **every** robot | |
-| Run the original map-point-sharing method | `./run_slam3.sh --method hq-mpshare` on every robot | |
-| Get an occupancy grid for planning | `./run_slam3.sh --grid` | `./run_rviz.sh <agent>` |
-| Drive one robot from the PC keyboard | `./run_slam3.sh --teleop` | `./run_teleop.sh <agent>` (opens RViz too) |
-| Send one robot to a point (Nav2) | `./run_slam3.sh --nav` (add `--teleop` to also see its camera) | `./run_rviz.sh <agent>`, then the **2D Goal Pose** button |
-| Same, but navigate on wheel odometry | `./run_slam3.sh --nav-wheels` | same |
-| Save keyframes for offline reconstruction | `./run_slam3.sh --save` | |
+| Run SLAM on one robot | `./run_slam.sh` | `./run_rviz.sh <agent>` to watch |
+| Run the multi-robot keyframe-sharing method (the research method) | `./run_slam.sh` (the default, same as `--method new`) on **every** robot | |
+| Run the original map-point-sharing method | `./run_slam.sh --method hq-mpshare` on every robot | |
+| Get an occupancy grid for planning | `./run_slam.sh --grid` | `./run_rviz.sh <agent>` |
+| Drive one robot from the PC keyboard | `./run_slam.sh --teleop` | `./run_teleop.sh <agent>` (opens RViz too) |
+| Send one robot to a point (Nav2) | `./run_slam.sh --nav` (add `--teleop` to also see its camera) | `./run_rviz.sh <agent>`, then the **2D Goal Pose** button |
+| Same, but navigate on wheel odometry | `./run_slam.sh --nav-wheels` | same |
+| Save keyframes for offline reconstruction | `./run_slam.sh --save` | |
 | Drive with a gamepad (no SLAM) | `./run_joystick.sh` | |
 | Follow Vicon waypoints | `./run_controller.sh` | |
 | Fix a wedged RealSense ("Frames didn't arrive") | `./reset_camera.sh` | |
 | Drive several simulated robots with Nav2, giving each its goals by hand | — | `./run_ma_sim_nav.sh` (Isaac window + one RViz per robot; report in `~/result/ma_nav/…`, step by step in [§10](#10-multi-robot-simulation-step-by-step)) |
 | Test several robots in simulation and score them against ground truth | — | `./run_ma_sim_test.sh` (report in `~/result/ma_sim/…`, step by step in [§10](#10-multi-robot-simulation-step-by-step)) |
+| Explore with the trained policy in Isaac Sim (the lab) | — | `./run_isaac_explore.sh` (the newest policy; `--planner mmpf` etc. for the published methods; report in `~/result/ma_explore/isaac/…`) |
+| Explore with real robots, planners on the PC | `./run_slam.sh --nav` (several robots: `--nav --ma-frames`) | `./run_robot_explore.sh <agent> [<agent> …]` |
+| Explore with real robots, policy on each robot | `./run_slam.sh --explore` (a team: `--explore --team "a b c" --ma-frames`) | optional live view: `ros2 run ma_explore_ros robot_view --ros-args -p agents:="<agent>"` |
 | Test the whole stack in Isaac Sim | — | terminal 1 `./run_isaac_sim.sh`; terminal 2 `./run_sim_slam.sh --nav --teleop`; then `ROS_DOMAIN_ID=31 ./run_rviz.sh sim` and/or `ROS_DOMAIN_ID=31 ./run_teleop.sh sim` |
 | Evaluate the sharing method offline on recorded data | — | `~/ORB_SLAM3/eval/kf_sharing/run_replay.sh` ([its README](https://github.com/shahaabshokouhi/ORB_SLAM3/blob/master/eval/kf_sharing/README.md)) |
 
-Flags can be combined, for example `./run_slam3.sh --method new --grid --teleop`.
+Every script explains itself, its options and the scripts that go with it: `./SCRIPT.sh --help`.
+Flags can be combined, for example `./run_slam.sh --method new --grid --teleop`.
 `--teleop` and `--nav` are **single-robot** features: they start the motor
 driver and publish robot-specific frames. Use them on one robot at a time.
 
@@ -70,13 +74,12 @@ driver and publish robot-specific frames. Use them on one robot at a time.
 
 | Variable | Used by | Example | Meaning |
 |---|---|---|---|
-| `AGENT_NAME` | `run_slam3.sh`, `run_slam.sh`, `run_joystick.sh`, `run_controller.sh`, `run_rviz.sh` (default) | `agent_2` / `shahab` | This robot's name. It prefixes every per-robot topic (`/<agent>/…`) and is the SLAM node's name. Must be unique per robot. |
-| `REALSENSE3_CONFIG` | `run_slam3.sh` | `~/realsense3.yaml` | ORB-SLAM3 settings file with **this camera's** calibration (ORB-SLAM3 format: `File.version`, `Camera.type`). |
-| `ORB_SLAM3_ROOT` | `run_slam3.sh` | `~/ORB_SLAM3` | Where the ORB_SLAM3 repo is (for the vocabulary). |
+| `AGENT_NAME` | `run_slam.sh`, `run_joystick.sh`, `run_controller.sh`, `run_rviz.sh` (default) | `agent_2` / `shahab` | This robot's name. It prefixes every per-robot topic (`/<agent>/…`) and is the SLAM node's name. Must be unique per robot. |
+| `REALSENSE3_CONFIG` | `run_slam.sh` | `~/realsense3.yaml` | ORB-SLAM3 settings file with **this camera's** calibration (ORB-SLAM3 format: `File.version`, `Camera.type`). |
+| `ORB_SLAM3_ROOT` | `run_slam.sh` | `~/ORB_SLAM3` | Where the ORB_SLAM3 repo is (for the vocabulary). |
 | `ROS_DOMAIN_ID` | all ROS processes | `10` | All machines that should see each other use the same value. The simulation uses its own (31, see `SIM_DOMAIN`). |
-| `REALSENSE_CONFIG`, `ORB_SLAM2_ROOT` | `run_slam.sh` (legacy ORB-SLAM2 only) | `~/realsense.yaml` | ORB-SLAM2-format settings and repo. |
-| `RESULT_DIR` | `run_slam3.sh --save` | `~/result` | Where `--save` writes its `slam_00N` dataset folders (default `~/result`). |
-| `TRACKING_CPU`, `TRACKING_RTPRIO` | `run_slam3.sh` | `5`, `80` | Optional: pin the tracking thread to one CPU core and give it real-time priority. |
+| `RESULT_DIR` | `run_slam.sh --save` | `~/result` | Where `--save` writes its `slam_00N` dataset folders (default `~/result`). |
+| `TRACKING_CPU`, `TRACKING_RTPRIO` | `run_slam.sh` | `5`, `80` | Optional: pin the tracking thread to one CPU core and give it real-time priority. |
 | `SIM_DOMAIN` | `run_isaac_sim.sh`, `run_sim_slam.sh` | `31` (default) | ROS domain of the simulated robot, kept apart from the real robots. |
 
 ### Build
@@ -87,11 +90,11 @@ cd ~/ORB_SLAM3 && ./rebuild.sh
 # 2. this workspace
 cd ~/workspaces/ros2_ws
 source /opt/ros/humble/setup.bash
-colcon build --packages-select orbslam2_msgs orb_slam3 jetracer jetracer_sim
+colcon build --packages-select orbslam3_msgs orb_slam3 jetracer jetracer_sim
 ```
 
-`run_slam3.sh` rebuilds `orb_slam3` itself each time. After a `git pull` that
-changed messages (`src/orbslam2_msgs`), rebuild `orbslam2_msgs` too, on every
+`run_slam.sh` rebuilds `orb_slam3` itself each time. After a `git pull` that
+changed messages (`src/orbslam3_msgs`), rebuild `orbslam3_msgs` too, on every
 machine.
 
 ### Extra packages
@@ -111,7 +114,7 @@ first (nothing in these repos uses it):
 
 ## 3. Scripts reference
 
-### `run_slam3.sh` — the robot's main entry point (ORB-SLAM3)
+### `run_slam.sh` — the robot's main entry point (ORB-SLAM3)
 
 Builds the `orb_slam3` package and launches
 `orb_slam3/launch/orb_slam3.launch.py` with the RealSense driver and the SLAM
@@ -140,7 +143,7 @@ Notes:
   view). Until then Nav2 prints `Timed out waiting for transform … odom`,
   which is normal.
 * Any `MA_NEW_*` environment variable is passed to the SLAM node, for example
-  `MA_NEW_VERBOSE=1 ./run_slam3.sh --method new` (list in the ORB_SLAM3 README).
+  `MA_NEW_VERBOSE=1 ./run_slam.sh --method new` (list in the ORB_SLAM3 README).
 
 ### `run_rviz.sh [AGENT [FRAME_PREFIX]]` — watch one robot (PC)
 
@@ -164,7 +167,7 @@ exist.
 Opens RViz (`run_rviz.sh`) in the background and turns the terminal into a
 keyboard controller (`ros2 run jetracer teleop`), publishing
 `/<AGENT>/cmd_vel` at 20 Hz while you drive (nothing while no key is held, so
-an open keyboard terminal does not fight Nav2). The robot needs `run_slam3.sh --teleop` (or
+an open keyboard terminal does not fight Nav2). The robot needs `run_slam.sh --teleop` (or
 `--nav`). Single robot only.
 
 | Key | Action |
@@ -224,7 +227,7 @@ driver. Start `run_isaac_sim.sh` first.
 | Option | Effect |
 |---|---|
 | *(none)* | SLAM + occupancy grid |
-| `--nav` | + Nav2 (position from SLAM), as `run_slam3.sh --nav` |
+| `--nav` | + Nav2 (position from SLAM), as `run_slam.sh --nav` |
 | `--nav-wheels` | + Nav2 on "wheel odometry", which in the simulation is the true pose |
 | `--teleop` | gray camera view for `run_teleop.sh` |
 | `--no-grid` | no occupancy grid |
@@ -324,9 +327,9 @@ of this PC; `--headless` saves some GPU.
 | `run_joystick.sh` | Gamepad driving without SLAM: `jetracer.launch.py` (joy node, `teleop_joy`, motor driver, wheel+IMU EKF, OLED display). Hold the dead-man button (button index 6) to drive. |
 | `run_controller.sh` | Vicon waypoint follower: `pid_controller.launch.py` (PID on the Vicon pose `/vicon/<agent>/<agent>`, waypoints from `jetracer/config/waypoints.yaml`, or goals published to it with `goal_subscriber:=true`, which this script sets). |
 | `reset_camera.sh` | Software unplug/replug of the RealSense (USB reset). Wait about 4 s afterwards. |
-| `run_slam.sh` | **Legacy:** the ORB-SLAM2 node (`orb_slam2` package) with `$REALSENSE_CONFIG`, `$ORB_SLAM2_ROOT`. Wire-compatible with ORB-SLAM3 robots running `hq-mpshare`. |
-| `build_run.sh` | **Legacy:** ORB-SLAM2 with hard-coded paths of the old `jetson1` robot. |
-| `clean_build.sh` | **Legacy, not in git:** wipes `build/ install/ log/` and rebuilds the ORB-SLAM2 packages (assumes `~/ros2_ws`). |
+| `clean_build.sh` | Wipes `build/ install/ log/` of this workspace and builds every package again. Needed once after a package rename (`orbslam2_msgs` → `orbslam3_msgs`, 15 Oct 2026). |
+| `run_isaac_explore.sh` | Exploration in Isaac Sim with an ma_explore planner (the trained policy or a baseline); the training's Isaac evaluations and the stored baselines run it. Needs `~/ma_explore`. |
+| `run_robot_explore.sh` | Exploration with real robots, the planners on this PC. Needs `~/ma_explore`. |
 | `~/ORB_SLAM3/eval/kf_sharing/run_replay.sh` | Offline evaluation: replays a recorded RGB-D sequence into several SLAM nodes on an isolated domain (77) and scores them against ground truth. Documented in the ORB_SLAM3 repo. |
 
 ---
@@ -335,7 +338,7 @@ of this PC; `--headless` saves some GPU.
 
 ### `orb_slam3/launch/orb_slam3.launch.py`
 
-What `run_slam3.sh` (and, without camera and driver, `run_sim_slam.sh`) runs.
+What `run_slam.sh` (and, without camera and driver, `run_sim_slam.sh`) runs.
 
 | Argument | Default | Meaning |
 |---|---|---|
@@ -346,12 +349,12 @@ What `run_slam3.sh` (and, without camera and driver, `run_sim_slam.sh`) runs.
 | `use_imu` | `false` | `false` / `true` / `auto` |
 | `save_keyframes`, `result_dir` | `false`, `` | `--save` |
 | `tracking_cpu`, `tracking_rtprio` | `-1`, `0` | pin / prioritise the tracking thread |
-| `monitor`, `monitor_rate_hz` | `true`, `2.0` | Jetson monitor (`run_slam3.sh` passes `false` unless `--monitor`) |
+| `monitor`, `monitor_rate_hz` | `true`, `2.0` | Jetson monitor (`run_slam.sh` passes `false` unless `--monitor`) |
 | `occupancy_grid` | `false` | `--grid` |
 | `teleop` | `false` | `--teleop`: gray view + motor driver |
 | `nav` | `false` | `--nav`: grid + navigation frames + motor driver + Nav2 |
 | `nav_pose` | `slam` | `slam` or `wheels` (`--nav-wheels`) |
-| `teleop_driver` | `true` | start the motor driver with teleop/nav (`run_slam3.sh` sets `false` when another script already runs one) |
+| `teleop_driver` | `true` | start the motor driver with teleop/nav (`run_slam.sh` sets `false` when another script already runs one) |
 | `port_name` | `/dev/ttyACM0` | motor board serial port |
 | `camera` | `true` | start the RealSense driver (`false` in simulation) |
 | `extra_params` | `` | a YAML file of SLAM node parameters applied last (the simulation uses it for its camera position) |
@@ -452,12 +455,13 @@ parameters. They are listed in the
 
 ### Robot-to-robot topics (global)
 
-`/orb_slam2/mappoints`, `/orb_slam2/single_mappoint` (hq-mpshare);
-`/orb_slam2/kf_bow`, `/orb_slam2/agent_request`, `/orb_slam2/camera_calib`,
-`/orb_slam2/kf_data`, `/orb_slam2/owner_update`,
-`/orb_slam2/back_observations` (new). The `orb_slam2` names are kept on
-purpose: ORB-SLAM2 and ORB-SLAM3 robots can share in a mixed fleet. Message
-definitions are in `src/orbslam2_msgs/msg`.
+`/orb_slam3/mappoints`, `/orb_slam3/single_mappoint` (hq-mpshare);
+`/orb_slam3/kf_bow`, `/orb_slam3/agent_request`, `/orb_slam3/camera_calib`,
+`/orb_slam3/kf_data`, `/orb_slam3/owner_update`,
+`/orb_slam3/back_observations` (new). Until 15 Oct 2026 these were
+`/orb_slam2/...` with the `orbslam2_msgs` package: every robot must run the
+same version. Message
+definitions are in `src/orbslam3_msgs/msg`.
 
 ### TF frames
 
@@ -753,10 +757,10 @@ robots or start poses: `"starts": [[x, y, heading_deg], ...]`, see
 | Path | What |
 |---|---|
 | `src/orb_slam3/` | The ROS 2 node around the ORB-SLAM3 library (`src/orb_slam3_node.cpp`). Camera input, pose and map output, robot-to-robot messaging, keyframe dataset saving, evaluation logs. `src/occupancy_mapper.hpp`: grid, scans, navigation frames, safety gate. `launch/orb_slam3.launch.py`, `config/` (Nav2). |
-| `src/orbslam2_msgs/` | Messages shared by all robots (map points, keyframe adverts and data, ownership updates…). |
+| `src/orbslam3_msgs/` | Messages shared by all robots (map points, keyframe adverts and data, ownership updates…). |
 | `src/jetracer/` | The car: motor/IMU driver `src/jetracer.cpp` (`/<agent>/cmd_vel` in, `odom`/`imu` out, stops after 1 s without commands); `scripts/teleop_keyboard.py` (`teleop`), `scripts/steer_calibration.py` (`steer_calibration`, how the car really turns), `teleop_joy.py`, `pid_controller.py` (Vicon waypoints), `display_node.py` (OLED), `odom_ekf.py`; `jetracer/jetson_monitor.py`; `config/waypoints.yaml`. |
 | `src/jetracer_sim/` | Isaac Sim stand-in: `isaac/run_isaac.py` (one or several cars), `isaac/room_dressing.py`, `isaac/views.py`, `jetracer_sim/cmd_vel_to_ackermann.py`, `launch/sim.launch.py`, `config/` (camera settings, multi-robot test specs `ma_*.json`, `room_obstacles.json`). Multi-robot tests: `jetracer_sim/routes.py`, `jetracer_sim/route_driver.py`, `eval/ma_report.py` (run by `run_ma_sim_test.sh`). |
-| `src/orb_slam2/` | Legacy ORB-SLAM2 node. |
+| `src/ma_explore_ros/` | The exploration planner on the robot (copied from ma_explore by the training; `policy/policy.pt` is the trained policy). |
 | `robot_view.rviz` | RViz layout used by `run_rviz.sh` (`__AGENT__` is replaced). |
 
 Run artefacts (`*mappoint_descriptors.csv`, `build/`, `install/`, `log/`) are
@@ -768,7 +772,7 @@ not tracked.
 
 | Symptom | Cause / fix |
 |---|---|
-| Robots don't see each other's maps | Different `ROS_DOMAIN_ID`, different `--method`, or one machine not pulled/rebuilt (message layouts must match: rebuild `orbslam2_msgs` + `orb_slam3`, and the ORB_SLAM3 library, everywhere). |
+| Robots don't see each other's maps | Different `ROS_DOMAIN_ID`, different `--method`, or one machine not pulled/rebuilt (message layouts must match: rebuild `orbslam3_msgs` + `orb_slam3`, and the ORB_SLAM3 library, everywhere). |
 | `Frames didn't arrive within 5 seconds` | `./reset_camera.sh`, wait 4 s, restart. |
 | `frame [map_nav] does not exist` in RViz | Floor not calibrated yet: the camera must see the floor 1–30 cm below it. The node logs why every 5 s (`[grid] still calibrating the floor: …`). On the desk the camera is too high; put it on the floor. |
 | Nav2 prints `Timed out waiting for transform … odom` | Normal for the first seconds (floor calibration). If it persists, check the line above. |
@@ -777,8 +781,8 @@ not tracked.
 | The car reacts late to obstacles (the pink cells appear only seconds after the camera sees the object) | The costmaps were dropping the live scan; fixed 2026-10-10 (`min_obstacle_height`), pull. To check: the **Live scan** dots in RViz show the object, and the local costmap should turn pink there within half a second. |
 | `GridBased: failed to create plan, exceeded maximum iterations` | The planner sees no way to the goal: the goal is inside an obstacle, or obstacles close it off. Look at the pink cells in RViz around the car and the goal. (A ring of fake obstacles around the car caused this until 2026-10-10: pull.) |
 | `Failed to make progress`, and the car keeps backing up a little | Something else is publishing on `/<agent>/cmd_vel` and cancelling Nav2's commands. Until 2026-10-10 the keyboard teleop sent "stop" 20 times a second even when idle: pull and rebuild `jetracer` on the PC. Also check that `run_joystick.sh` / `run_controller.sh` aren't running. |
-| The real car can't follow the planned path in turns (the sim can) | The motor board turns the turn-rate command into a servo position with its own, uncalibrated coefficients, so the car may not reach the planner's 0.35 m radius. Measure it (needs about 2 × 2 m of free floor): robot `./run_slam3.sh --teleop --grid`, PC `ros2 run jetracer steer_calibration --ros-args -p agent_name:=<agent>` (with the robot's `ROS_DOMAIN_ID`). It prints the tightest radius the car drives and suggests `minimum_turning_radius` for `nav2_jetracer.yaml`. Sim reference: tightest 0.35 m, gentle curves 84 %. |
-| `run_slam3.sh --nav` refuses to start | `run_joystick.sh` / `run_controller.sh` is running and publishes its own robot pose. Stop it, or use `--nav-wheels`. |
+| The real car can't follow the planned path in turns (the sim can) | The motor board turns the turn-rate command into a servo position with its own, uncalibrated coefficients, so the car may not reach the planner's 0.35 m radius. Measure it (needs about 2 × 2 m of free floor): robot `./run_slam.sh --teleop --grid`, PC `ros2 run jetracer steer_calibration --ros-args -p agent_name:=<agent>` (with the robot's `ROS_DOMAIN_ID`). It prints the tightest radius the car drives and suggests `minimum_turning_radius` for `nav2_jetracer.yaml`. Sim reference: tightest 0.35 m, gentle curves 84 %. |
+| `run_slam.sh --nav` refuses to start | `run_joystick.sh` / `run_controller.sh` is running and publishes its own robot pose. Stop it, or use `--nav-wheels`. |
 | Simulation: black camera image or tracking lost after ~1 m | Use the defaults of `run_isaac_sim.sh` (clipping fix, furnished room and lights are applied automatically). |
 | Simulation: Isaac exits at start, or the camera topic has 2 publishers / stray `/drive`, `/odom`, `/tf` | The `.usd` was saved after a run (possibly with the scene added twice). Restore the original file; see the note in [§9](#9-how-the-isaac-sim-stand-in-works). |
 | Simulation topics invisible | Use `ROS_DOMAIN_ID=31` (or `$SIM_DOMAIN`) in every terminal that talks to the simulation. |

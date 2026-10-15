@@ -8,9 +8,9 @@ WAIT, or REVISIT a merged teammate's pose) and sends it to its Nav2.
 ## Run
 
     # one robot (plain frames)
-    ./run_slam3.sh --explore
+    ./run_slam.sh --explore
     # several robots on one ROS domain: on each robot, the whole team named
-    ./run_slam3.sh --explore --ma-frames --team "robot1 robot2 robot3"
+    ./run_slam.sh --explore --ma-frames --team "robot1 robot2 robot3"
 
 `--explore` is `--nav` (SLAM, grid, Nav2) plus this planner; it starts
 exploring once Nav2 is up and the floor is calibrated. Pause and resume:
@@ -95,6 +95,6 @@ decision takes on this computer.
 
 The modules in `ma_explore_ros/` (env, geometry, model, live, baselines,
 policy_io, ros_planner, robot_view) are copies of the training repository
-(~/ma_explore on the training PC), made by its `scripts/sync_robot_package.sh`;
+(~/ma_explore on the training PC), made by its `python -m ma_explore.robot_package --modules-only`;
 `ma_explore_ros/SYNCED_FROM` names the commit. Edit them there, not here: the
 live observation must stay identical to the training one.

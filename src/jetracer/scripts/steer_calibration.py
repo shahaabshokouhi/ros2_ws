@@ -10,7 +10,7 @@ drives can differ. This drives a series of fixed (v, w) commands, a few
 seconds each, left and right (reversing back along the same arc after
 each, so the car stays on a small patch), and measures the curve driven from
 the SLAM pose of the rear axle (/<agent>/orb_slam3/odom, so the robot needs
-`run_slam3.sh --teleop --grid`). It prints, per command, the commanded and
+`run_slam.sh --teleop --grid`). It prints, per command, the commanded and
 the driven radius, and at the end the tightest radius the car can drive and
 how far gentle curves are off, with the settings that follow from them.
 
@@ -124,7 +124,7 @@ def main():
         rclpy.spin_once(n, timeout_sec=0.1)
     if not n.pose_fresh():
         print(f'No SLAM pose on /{n.agent}/orb_slam3/odom. Start the robot with '
-              f'`./run_slam3.sh --teleop --grid`, wait for "camera mount fitted to the floor", '
+              f'`./run_slam.sh --teleop --grid`, wait for "camera mount fitted to the floor", '
               f'and check ROS_DOMAIN_ID.')
         return
     k_max = math.tan(MAX_STEER) / WHEELBASE

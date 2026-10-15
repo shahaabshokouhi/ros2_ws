@@ -1,13 +1,19 @@
 #!/bin/bash
-# The robot's stack (ORB-SLAM3, grid, Nav2) on the Isaac Sim JetRacer.
-# Start ./run_isaac_sim.sh first.
+# SIMULATION. The robot's stack (ORB-SLAM3, grid, Nav2) for the ONE simulated car of
+# ./run_isaac_sim.sh (start that first, in another terminal). The simulation's run_slam.sh.
 #
 #   ./run_sim_slam.sh [--nav | --nav-wheels] [--teleop] [--no-grid] [--agent NAME]
 #
-#   --nav         Nav2, position feedback from SLAM (as on the robot)
-#   --nav-wheels  Nav2 on "wheel odometry" (in the sim: the true pose) corrected by SLAM
-#   --teleop      gray camera view for ./run_teleop.sh
-# Same ROS domain as run_isaac_sim.sh ($SIM_DOMAIN, default 31).
+#   --nav         Nav2, position from SLAM (as on the robot); goals: ROS_DOMAIN_ID=31 ./run_rviz.sh sim
+#   --nav-wheels  Nav2 on "wheel odometry" (in the simulation: the true pose) corrected by SLAM
+#   --teleop      gray camera view for ROS_DOMAIN_ID=31 ./run_teleop.sh sim
+#   --no-grid     no occupancy grid
+#   --agent NAME  the car's name (default sim)
+#
+# Examples:
+#   ./run_sim_slam.sh --teleop             then: ROS_DOMAIN_ID=31 ./run_teleop.sh sim
+#   ./run_sim_slam.sh --nav                then: ROS_DOMAIN_ID=31 ./run_rviz.sh sim
+if [[ "$1" == -h || "$1" == --help ]]; then awk 'NR>1{if(!/^#/)exit; sub(/^# ?/,""); print}' "$0"; exit 0; fi
 HERE="$(cd "$(dirname "$0")" && pwd)"
 AGENT=sim; GRID=true; NAV=false; NAV_POSE=slam; TELEOP=false
 while [[ $# -gt 0 ]]; do

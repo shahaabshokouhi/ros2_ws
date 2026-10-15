@@ -1,31 +1,30 @@
 #!/bin/bash
-# Multi-robot test in Isaac Sim: several JetRacers in one simulated room, each
-# running its own SLAM stack (multi-robot method new or hq-mpshare), driven
-# repeatably along a route; then scored against the simulator's ground truth.
+# SIMULATION, SLAM test. Several cars in Isaac Sim, each with its own SLAM, driven
+# repeatably along fixed routes (no planner), then scored against the simulator's ground
+# truth: path errors, map merging, timing. Starts everything itself (about 5 minutes for
+# the default spec). Stops any simulation of this workspace that is still running.
 #
 #   ./run_ma_sim_test.sh [--spec FILE] [--method new|hq-mpshare] [--name NAME]
 #                        [--gui] [--settle SECONDS] [--no-report]
 #
-#   --spec     test spec (default src/jetracer_sim/config/ma_room_loop3.json:
-#              three cars on one loop in the furnished room, a third of a lap apart)
-#   --method   multi-robot method for every robot (default new)
-#   --name     label for the result folder (default: the spec's name)
-#   --gui      show the Isaac window (default headless)
-#   --settle   seconds to let sharing finish after driving (default 20)
+#   --spec      robots, routes and start poses (default src/jetracer_sim/config/ma_room_loop3.json:
+#               three cars on one loop in the room, a third of a lap apart)
+#   --method    how robots share maps (default new)
+#   --name      label of the result folder (default: the spec's name)
+#   --gui       show the Isaac window (default: headless)
+#   --settle    seconds to let sharing finish after driving (default 20)
+#   --no-report do not write the report
 #
-# Results: ~/result/ma_sim/<date>_<name>_<method>/ (or $MA_RESULT_DIR/...):
-#   report.html, report.pdf, metrics.json, figures/, tables/  the report
-#   raw/   spec, ground truth (raw/gt/<agent>_gt.csv), each robot's SLAM
-#          evaluation files (raw/<agent>/eval/: keyframes, map points,
-#          alignments, verifications, timing), live SLAM poses (raw/online/),
-#          all logs, and the software versions (raw/env.txt)
-# Re-score a run later with:
-#   ~/venvs/env_isaaclab/bin/python src/jetracer_sim/eval/ma_report.py <run folder>
+# Results: ~/result/ma_sim/DATE_NAME_METHOD/ (or $MA_RESULT_DIR/...): report.html/.pdf,
+# metrics.json, figures/, tables/, raw/ (ground truth, SLAM logs, versions). Re-score later:
+#   ~/venvs/env_isaaclab/bin/python src/jetracer_sim/eval/ma_report.py RUN_FOLDER
 #
-# Uses ROS_DOMAIN_ID 31 ($SIM_DOMAIN). Stops any simulation from this
-# workspace that is still running. Takes about 5 minutes for the default spec.
-# The whole script is one function, read completely before it runs: editing
-# or pulling this file during a test cannot change the running test.
+# The room only (the lab: run_isaac_explore.sh).
+#
+# Examples:
+#   ./run_ma_sim_test.sh
+#   ./run_ma_sim_test.sh --method hq-mpshare --name compare
+if [[ "$1" == -h || "$1" == --help ]]; then awk 'NR>1{if(!/^#/)exit; sub(/^# ?/,""); print}' "$0"; exit 0; fi
 main() {
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SPEC="$HERE/src/jetracer_sim/config/ma_room_loop3.json"

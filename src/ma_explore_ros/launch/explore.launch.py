@@ -4,8 +4,8 @@ chooses this robot's goals and sends them to its Nav2.
     ros2 launch ma_explore_ros explore.launch.py [agent:=$AGENT_NAME] [agents:="robot1 robot2 robot3"]
         [policy:=FILE] [frames:=plain|prefixed] [device:=cpu|cuda] [start_enabled:=true]
 
-Needs SLAM, the grid and Nav2 running on the robot (run_slam3.sh --nav, or
---explore, which starts this too). Usually started by run_slam3.sh --explore.
+Needs SLAM, the grid and Nav2 running on the robot (run_slam.sh --nav, or
+--explore, which starts this too). Usually started by run_slam.sh --explore.
 
   agent    this robot (default $AGENT_NAME)
   agents   the team, this robot included (default: this robot only). The
@@ -13,7 +13,7 @@ Needs SLAM, the grid and Nav2 running on the robot (run_slam3.sh --nav, or
            count as never merged.
   policy   default: <workspace>/src/ma_explore_ros/policy/policy.pt (copy the
            trained network there; no rebuild needed), else the installed copy
-  frames   plain: map_nav, odom, ... (run_slam3.sh --nav); prefixed:
+  frames   plain: map_nav, odom, ... (run_slam.sh --nav); prefixed:
            <agent>/map_nav, ... (--ma-frames, several robots on one ROS domain)
   start_enabled  false: wait for /ma_explore/<agent>/enable (std_msgs/Bool true)
   goal_standoff  cells (0.1 m) frontier goals stand back from the unknown (default 5:
@@ -49,7 +49,7 @@ def setup(context):
         agents = agent + ' ' + agents
     policy = os.path.expanduser(get('policy') or default_policy())
     if not os.path.exists(policy) and policy.endswith('.pt'):
-        raise RuntimeError(f'no policy file {policy}: copy the trained robot_policy.pt there (see policy/README.md)')
+        raise RuntimeError(f'no policy file {policy}: a finished training run on the PC puts it there; git pull (see policy/README.md)')
     frames = get('frames')
     if frames not in ('plain', 'prefixed'):
         raise RuntimeError("frames must be plain or prefixed")

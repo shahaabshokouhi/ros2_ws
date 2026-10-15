@@ -1,4 +1,4 @@
-# Copied from ma_explore (fbdfb24) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (6789422+changes) by ma_explore.robot_package: edit it there, not here.
 """Batched multi-robot exploration environment on the GPU.
 
 B environments x N robots step together. Each robot has its OWN map (what it
@@ -124,6 +124,41 @@ Any map size (15 Oct 2026; ego_obs, node_by 'move', unc_reward 'change'):
     uncertainty (instead of + w_unc x what loops remove, 'removed'). Over a
     mission it sums to - w_unc x the uncertainty of the map handed over, so
     once the map is covered, closing loops (REVISIT-OWN) is what pays.
+
+Outcome reward (16 Oct 2026; reward_mode 'outcome', revisit_path, loop_model 'kf'):
+  * An action runs from one decision of the robot to its next (event
+    decisions) and is paid, at its last step, what it achieved meanwhile:
+    + w_cov x the coverage the robot found that nobody had seen, + w_drift x
+    the drift (m) loops and links removed from its map, + w_merge x the merge
+    error its links removed (in units of the error at the merge; a new merge
+    counts as one unit for each robot of the pair), - w_drift x the drift its
+    driving added, - time_cost per step. Nothing is paid while it runs; the
+    critic sees what is pending (per robot: gains, costs, on a revisit path).
+    An action that fails (no path to its goal, a trip of trip_max_steps) is
+    paid its costs only. All other weights are unused.
+  * A revisit (a merged teammate's path, or the robot's own older path)
+    drives path_poses poses of that path, path_spacing ticks of that robot's
+    motion apart, in the order it drove them (so the camera looks the way it
+    looked then): the first with the heading it had there, then on along the
+    path. At the last pose it waits up to settle_s (one SLAM manager cycle)
+    for the correction the revisit is for, a loop closure (own path) or a link
+    with that teammate, and stops waiting as soon as it comes. Events do not
+    interrupt a revisit; a failure does.
+  * loop_model 'kf' is ORB-SLAM3's loop rule (LoopClosing.cc): every kf_ticks
+    ticks of motion a keyframe; one that sees loop_views of the robot's own
+    old views matches with chance kf_match; loop_confirm matches confirm the
+    loop (mnLoopNumCoincidences >= 3) and loop_miss misses in a row reset the
+    count (mnLoopNumNotFound >= 2); the correction lands loop_latency_s plus
+    the backlog later. A robot standing still makes no keyframes: driving the
+    old path is what closes a loop, the wait only lets the correction land.
+
+Tracking loss (16 Oct 2026; lost_manoeuvre, lost_recover, cand_bearing), fitted in the 22 x 16 m Isaac lab: a
+manoeuvre -- a turn on the spot, or a heading change of manoeuvre_deg or more within one tick, which a car can
+only make as a multi-point turn -- loses tracking with chance lost_manoeuvre, and such a loss lasts the rest of
+the mission with chance 1 - lost_man_recover (the cars' camera then faces a wall close by, and reversing along the
+path did not relocalize: 0 of 9). Other losses (lost_p0, lost_lag, lost_turn) end after lost_ticks with chance
+lost_recover, else they too last the mission. A robot lost for good stands still. With cand_bearing the robot
+sees where each candidate lies from the way it faces (cos, sin), so it can learn which goals need a manoeuvre.
 """
 import math
 from dataclasses import dataclass, field
@@ -168,6 +203,10 @@ def _obs_dims(cfg):
         d['cand'] += 2
         d['scalars'] += 1
         d['state_scalars'] += 1
+    if cfg.cand_bearing:                         # cos, sin of the candidate's bearing from the robot's heading
+        d['cand'] += 2
+    if cfg.reward_mode == 'outcome':             # per robot: its running action's gains, costs, on a revisit path
+        d['state_scalars'] += 3
     return d
 
 
@@ -308,6 +347,31 @@ class EnvConfig:
     max_steps_cap: int = 0         # ... longest episode with steps_ref_cells (0: max_steps)
     node_by: str = 'time'          # pose-graph nodes per node_ticks ticks of 'time' or of the robot's own 'move'ment
     unc_reward: str = 'removed'    # 'removed': + w_unc x uncertainty loops remove; 'change': - w_unc x its change
+    # outcome reward and path revisits (16 Oct 2026; module docstring "Outcome reward"): off = as before
+    reward_mode: str = 'step'      # 'step': the terms above, every step; 'outcome': each action is paid what it
+                                   # achieved when it ends (w_cov, w_drift, w_merge, time_cost only)
+    w_cov: float = 10.0            # outcome: per unit of coverage the robot added that nobody had seen
+    revisit_path: bool = False     # a revisit (a teammate's or own) = path_poses poses along the old path,
+    path_poses: int = 3            # path_spacing ticks of that robot's motion apart, driven in the original
+    path_spacing: int = 8          # direction, then a wait of up to settle_s for the correction (it ends as
+    settle_s: float = 10.0         # soon as the correction comes); not interrupted by events, only by failure
+    # loop_model 'kf': ORB-SLAM3's loop rule (LoopClosing.cc): a keyframe per kf_ticks ticks of motion; one
+    # with loop_views own old views in sight matches with chance kf_match; loop_confirm matches confirm the
+    # loop, loop_miss misses in a row reset the count; the correction lands loop_latency_s (+ the backlog) later
+    kf_ticks: int = 4
+    kf_match: float = 0.8
+    loop_confirm: int = 3
+    loop_miss: int = 2
+    loop_latency_s: float = 2.0
+    # tracking loss fitted in the laboratory (16 Oct 2026; module docstring "Tracking loss"): a manoeuvre (a turn on
+    # the spot, or a heading change of manoeuvre_deg or more within one tick: a car needs a multi-point turn) loses
+    # tracking with chance lost_manoeuvre, for good with chance 1 - lost_man_recover; any other loss (lost_p0,
+    # lost_lag, lost_turn) is recovered after lost_ticks with chance lost_recover, else lasts the rest of the mission
+    lost_manoeuvre: float = 0.0
+    manoeuvre_deg: float = 90.0
+    lost_man_recover: float = 1.0
+    lost_recover: float = 1.0
+    cand_bearing: bool = False     # candidate features: cos and sin of its bearing from the robot's heading
 
 
 class ExploreEnv:
@@ -376,7 +440,7 @@ class ExploreEnv:
             self.step_drift = torch.zeros(B, device=d)      # avoidable drift added - drift corrected
         assert not (c.graph_model and not c.pose_revisit), 'graph_model needs pose_revisit (links at poses)'
         assert c.link_model in ('pose', 'views'), c.link_model
-        assert c.loop_model in ('random', 'views'), c.loop_model
+        assert c.loop_model in ('random', 'views', 'kf'), c.loop_model
         assert not (c.loop_model == 'views' and c.link_model != 'views'), "loop_model views needs link_model views"
         assert not (c.n_self_revisit and not (c.graph_model and c.pose_revisit)), 'n_self_revisit needs graph_model'
         self.views = c.slam_model and c.link_model == 'views'
@@ -427,6 +491,47 @@ class ExploreEnv:
         if self.views:
             self.old_views = torch.zeros(B, N, device=d)                   # own old views in sight now
             self.old_view_tick = torch.zeros(B, N, dtype=torch.long, device=d)
+        assert c.reward_mode in ('step', 'outcome'), c.reward_mode
+        self.outcome = c.reward_mode == 'outcome'
+        self.paths = c.revisit_path
+        assert not (self.outcome and not (self.graph and c.event_decisions)), 'outcome needs graph_model, event_decisions'
+        assert not (self.paths and not (self.poses and c.pose_revisit and c.event_decisions)), \
+            'revisit_path needs pose_revisit and event_decisions'
+        assert not (c.loop_model == 'kf' and not self.views), "loop_model kf needs link_model views"
+        assert not (self.paths and c.path_poses < 2), 'a revisit path has at least two poses'
+        if self.paths:
+            P = c.path_poses
+            self.TT = self.longest() * c.ticks + 1                                       # ticks per episode, at most
+            self.path_log = torch.zeros(B, N, self.TT, 2, dtype=torch.int16, device=d)   # each robot's cell per tick
+            # ticks of motion (driving or turning) up to each tick; beyond now: MOVE_END (sorted, for searchsorted)
+            self.move_log = torch.full((B, N, self.TT), self.MOVE_END, dtype=torch.int16, device=d)
+            self.moved = torch.zeros(B, N, dtype=torch.long, device=d)
+            self.cand_wp = torch.zeros(B, N, K, P, 2, dtype=torch.long, device=d)       # a revisit slot's poses
+            self.wp = torch.zeros(B, N, P, 2, dtype=torch.long, device=d)               # the poses being driven
+            self.wp_i = torch.full((B, N), P, dtype=torch.long, device=d)                # driving to wp[wp_i]; P: none
+            self.wp_field = torch.full((B, N, P - 1, H, W), G.INF, device=d)            # path fields to wp[1:]
+            self.settle = torch.zeros(B, N, dtype=torch.long, device=d)                  # settle ticks left
+            self.settle_ticks = math.ceil(c.settle_s / c.tick_s)
+            self.goal_mate = torch.full((B, N), -1, dtype=torch.long, device=d)          # whose path (own: itself)
+            self.confirmed = torch.zeros(B, N, dtype=torch.bool, device=d)               # its correction came
+        if c.slam_model:
+            self.manoeuvre = torch.zeros(B, N, dtype=torch.bool, device=d)    # a manoeuvre this tick (lost_manoeuvre)
+            self.lost_for_good = torch.zeros(B, N, dtype=torch.bool, device=d)
+        if c.loop_model == 'kf':
+            self.kf_acc = torch.zeros(B, N, dtype=torch.long, device=d)       # ticks of motion since the last keyframe
+            self.coin = torch.zeros(B, N, dtype=torch.long, device=d)         # matches in a row (mnLoopNumCoincidences)
+            self.miss = torch.zeros(B, N, dtype=torch.long, device=d)         # misses since (mnLoopNumNotFound)
+            self.loop_due = torch.full((B, N), -1, dtype=torch.long, device=d)   # tick a confirmed loop lands
+            self.loop_then = torch.zeros(B, N, dtype=torch.long, device=d)       # ... and its oldest own view's tick
+        if self.outcome:
+            self.opt_pos = torch.zeros(B, N, device=d)       # the running action's gains so far ...
+            self.opt_neg = torch.zeros(B, N, device=d)       # ... and costs (time, drift added): paid when it ends
+            self.opt_fail = torch.zeros(B, N, dtype=torch.bool, device=d)   # it failed: only the costs are paid
+            self.step_dadd = torch.zeros(B, N, device=d)     # drift added this step (m)
+            self.step_drem = torch.zeros(B, N, device=d)     # drift removed by loops and links (m)
+            self.step_mgain = torch.zeros(B, N, device=d)    # merge error removed (units of merge_err0), new merges
+
+    MOVE_END = 32767
 
     # ── episodes ─────────────────────────────────────────────────────────
     def longest(self):
@@ -511,6 +616,8 @@ class ExploreEnv:
             for name in ('backlog', 'drift', 'since_corr', 'links', 'step_lost', 'step_links', 'step_drift'):
                 getattr(self, name)[idx] = 0
             self.lost[idx] = 0
+            self.manoeuvre[idx] = False
+            self.lost_for_good[idx] = False
             self.last_link[idx] = -10 ** 6
             self.last_loop[idx] = -10 ** 6
             self.first_seen[idx] = -1
@@ -535,6 +642,24 @@ class ExploreEnv:
             self.unc_prev[idx] = 0
             if self.node_at is not None:
                 self.node_at[idx] = 0
+        if self.paths:
+            self.path_log[idx] = 0
+            self.path_log[idx, :, 0] = pos.to(torch.int16)
+            self.move_log[idx] = self.MOVE_END
+            self.move_log[idx, :, 0] = 0
+            self.moved[idx] = 0
+            self.wp_i[idx] = c.path_poses
+            self.settle[idx] = 0
+            self.goal_mate[idx] = -1
+            self.confirmed[idx] = False
+        if c.loop_model == 'kf':
+            for name in ('kf_acc', 'coin', 'miss', 'loop_then'):
+                getattr(self, name)[idx] = 0
+            self.loop_due[idx] = -1
+        if self.outcome:
+            for name in ('opt_pos', 'opt_neg', 'step_dadd', 'step_drem', 'step_mgain'):
+                getattr(self, name)[idx] = 0
+            self.opt_fail[idx] = False
         self._sense(idx)
         self._merge()
         tc, kc = self._coverage()
@@ -565,7 +690,7 @@ class ExploreEnv:
                                  / (2 * math.pi / nb)).long().clamp(max=nb - 1)
                 vi = seen_i * nb + hb[seen_i // (H * W)]
                 fv = self.first_view[envs].reshape(-1)
-                if self.cfg.loop_model == 'views':     # own views first seen long ago, in sight now (loops)
+                if self.cfg.loop_model in ('views', 'kf'):   # own views first seen long ago, in sight now (loops)
                     first = fv[vi].long()
                     ri = vi // (H * W * nb)                                              # robot (env-major)
                     now_t = self.tick[envs][vi // (N * H * W * nb)]
@@ -612,6 +737,8 @@ class ExploreEnv:
                 m = m | (torch.einsum('bnk,bkm->bnm', m.float(), m.float()) > 0)
         new = m & ~self.merged
         self.merged = m
+        if self.outcome:          # a new merge: one unit (the error at the merge) for each robot of the pair
+            self.step_mgain += new.float().sum(2)
         if self.graph and new.any():
             self._merge_edges(new)
 
@@ -674,6 +801,8 @@ class ExploreEnv:
         new_heading = torch.atan2((by - y).float(), (bx - x).float())
         turn = torch.remainder(new_heading - self.heading.view(-1) + math.pi, 2 * math.pi) - math.pi
         turn = torch.where(moving, turn.abs(), torch.zeros_like(turn))
+        if self.cfg.slam_model and self.cfg.lost_manoeuvre:        # too sharp for a car: a multi-point turn
+            self.manoeuvre.view(-1)[:] |= turn >= math.radians(self.cfg.manoeuvre_deg) - 1e-6
         self.heading.view(-1)[moving] = new_heading[moving]
         self.pos[..., 0] = by.view(B, N)
         self.pos[..., 1] = bx.view(B, N)
@@ -688,8 +817,40 @@ class ExploreEnv:
         else:                                    # without turn modelling: face the frontier at a stand-off goal
             arr = reached & self.has_goal & ~torch.isnan(self.view_yaw)
             self.heading[arr] = self.view_yaw[arr]
-        self.has_goal &= ~reached
+        if self.paths:
+            # a revisit path: on to its next pose; at the last one, wait for the correction (unless it came)
+            P = self.cfg.path_poses
+            arrive = reached & self.has_goal & (self.wp_i < P)
+            nxt = arrive & (self.wp_i < P - 1)
+            last = arrive & ~nxt
+            self.has_goal &= ~(reached & ~nxt)
+            if nxt.any():
+                self.trip = torch.where(nxt, torch.zeros_like(self.trip), self.trip)     # each leg: a trip of its own
+                self.wp_i = torch.where(nxt, self.wp_i + 1, self.wp_i)
+                self.goal = torch.where(nxt[..., None], self._wp_now(), self.goal)
+                b_, n_ = nxt.nonzero(as_tuple=True)                                       # (fields made at the choice)
+                self.goal_field[b_, n_] = self.wp_field[b_, n_, self.wp_i[b_, n_] - 1]
+            self.wp_i = torch.where(last, torch.full_like(self.wp_i, P), self.wp_i)
+            self.settle = torch.where(last & ~self.confirmed, torch.full_like(self.settle, self.settle_ticks), self.settle)
+        else:
+            self.has_goal &= ~reached
         return moving.view(B, N), step.view(B, N), turn.view(B, N)
+
+    def _wp_now(self):
+        """(B, N, 2): the pose of the revisit path each robot drives to now (wp[wp_i], clamped)."""
+        i = self.wp_i.clamp(max=self.cfg.path_poses - 1)
+        return self.wp.gather(2, i[..., None, None].expand(self.B, self.N, 1, 2)).squeeze(2)
+
+    def _goal_fields(self, m):
+        """Path distance fields to the goals of the robots in m (B, N) on the true map (the stand-in for Nav2)."""
+        B, N, H, W = self.B, self.N, self.H, self.W
+        ch = m.reshape(-1).nonzero().squeeze(1)
+        if ch.numel():
+            src = torch.zeros(ch.numel(), H, W, dtype=torch.bool, device=self.dev)
+            g = self.goal.view(-1, 2)[ch]
+            src[torch.arange(ch.numel(), device=self.dev), g[:, 0], g[:, 1]] = True
+            stand = self.stand[:, None].expand(B, N, H, W).reshape(-1, H, W)[ch]
+            self.goal_field.view(-1, H, W)[ch] = G.distance_field(stand, src)
 
     def _start_turn(self, arrived):
         """Robots arriving at a revisit pose turn to its heading (the view the teammate had)."""
@@ -699,6 +860,8 @@ class ExploreEnv:
         dpsi = torch.remainder(self.goal_yaw - self.heading + math.pi, 2 * math.pi) - math.pi
         n = torch.ceil(self.cfg.turn_ticks * dpsi.abs() / math.pi).long()
         self.turning = torch.where(m, n, self.turning)
+        if self.cfg.lost_manoeuvre:                                  # turning on the spot: a manoeuvre
+            self.manoeuvre |= m & (dpsi.abs() >= math.radians(self.cfg.manoeuvre_deg) - 1e-6)
         self.turn_rate = torch.where(m, dpsi.abs() / n.clamp(min=1), self.turn_rate)
         err = (self._rand(*m.shape) * 2 - 1) * math.radians(self.cfg.revisit_yaw_err_deg)
         self.heading = torch.where(m, self.goal_yaw + err, self.heading)
@@ -714,7 +877,9 @@ class ExploreEnv:
         n_fixed = self.n_fixed()                 # keep (+ wait): slots that set no new goal
         go = a >= n_fixed
         self.waiting = (a == 1) if n_fixed == 2 else torch.zeros_like(go)
-        change = go | (~self.has_goal & ~self.waiting)
+        # a robot waiting for the correction at the end of a revisit path has no goal but is not deciding
+        settling = (self.settle > 0) if self.paths else torch.zeros_like(go)
+        change = (go | (~self.has_goal & ~self.waiting)) & ~settling
         self.choices += (self.cand_mask.sum(-1) > 1).float()           # steps with a real choice
         self.goals_set += go.float()
         if c.event_decisions:
@@ -751,15 +916,35 @@ class ExploreEnv:
                 self.heading = torch.where(flip, torch.remainder(self.heading + 2 * math.pi, 2 * math.pi) - math.pi,
                                            self.heading)
         self.has_goal &= ~(self.goal == self.pos).all(-1)
-        ch = (change & self.has_goal).view(-1).nonzero().squeeze(1)
-        if ch.numel():
-            src = torch.zeros(ch.numel(), H, W, dtype=torch.bool, device=self.dev)
-            g = self.goal.view(-1, 2)[ch]
-            src[torch.arange(ch.numel(), device=self.dev), g[:, 0], g[:, 1]] = True
-            stand = self.stand[:, None].expand(B, N, H, W).reshape(-1, H, W)[ch]
-            self.goal_field.view(-1, H, W)[ch] = G.distance_field(stand, src)
+        if self.paths:
+            # a revisit path: its poses, whose path (own: the robot itself); chosen where the robot stands,
+            # it heads on to the second pose at once (after turning to the first one's heading)
+            P = c.path_poses
+            is_path = go & ((kind == 2) | (kind == 3))
+            wp = torch.gather(self.cand_wp, 2, a[..., None, None, None].expand(B, N, 1, P, 2)).squeeze(2)
+            self.wp = torch.where(is_path[..., None, None], wp, self.wp)
+            self.wp_i = torch.where(is_path, torch.zeros_like(self.wp_i), torch.where(change, P, self.wp_i))
+            mate_sel = torch.gather(self.cand_mate, 2, a[..., None]).squeeze(-1)
+            me = torch.arange(N, device=self.dev)[None].expand(B, N)
+            self.goal_mate = torch.where(is_path, torch.where(kind == 3, me, mate_sel),
+                                         torch.where(change, torch.full_like(self.goal_mate, -1), self.goal_mate))
+            self.confirmed &= ~change
+            adv = is_path & here
+            if adv.any():
+                self.wp_i = torch.where(adv, torch.ones_like(self.wp_i), self.wp_i)
+                self.goal = torch.where(adv[..., None], self._wp_now(), self.goal)
+                self.has_goal = self.has_goal | adv
+            if is_path.any():       # the path fields to the later poses, once, with the goal fields below
+                b_, n_ = is_path.nonzero(as_tuple=True)
+                src = torch.zeros(b_.numel(), P - 1, H, W, dtype=torch.bool, device=self.dev)
+                w = self.wp[b_, n_, 1:]                                                   # (k, P-1, 2)
+                kk = torch.arange(b_.numel(), device=self.dev)[:, None].expand(-1, P - 1)
+                src[kk, torch.arange(P - 1, device=self.dev)[None].expand_as(kk), w[..., 0], w[..., 1]] = True
+                stand = self.stand[b_][:, None].expand(-1, P - 1, H, W).reshape(-1, H, W)
+                self.wp_field[b_, n_] = G.distance_field(stand, src.view(-1, H, W)).view(-1, P - 1, H, W)
+        self._goal_fields(change & self.has_goal)
         old_tc, old_kc = self.team_cov.clone(), self.know_cov.clone()
-        if c.w_own:
+        if c.w_own or self.outcome:
             team_before = self.seen_free.any(1) & self.target                 # (B, H, W)
         if c.slam_model:
             old_merged = self.merged.clone()
@@ -771,11 +956,17 @@ class ExploreEnv:
             self.step_conn.zero_()
             self.step_merge.zero_()
             self.step_unc.zero_()
+        if self.outcome:
+            self.step_dadd.zero_()
+            self.step_drem.zero_()
+            self.step_mgain.zero_()
         for _ in range(c.ticks):
             moving, steplen, turn = self._drive()
             new_cells = self._sense()
             if c.slam_model:
                 self._slam_tick(moving, steplen, turn, new_cells)
+            if self.paths:          # the settle wait: one tick less, over at once when the correction has come
+                self.settle = torch.where(self.confirmed, torch.zeros_like(self.settle), (self.settle - 1).clamp(min=0))
         self._merge()
         if c.event_decisions:
             # events for the next step: WAIT lasts one step; no path to the goal; a new merge while
@@ -784,7 +975,13 @@ class ExploreEnv:
             bi_, ni_ = torch.arange(B, device=self.dev)[:, None], torch.arange(N, device=self.dev)[None]
             no_path = self.has_goal & (self.goal_field[bi_, ni_, self.pos[..., 0], self.pos[..., 1]] >= G.INF)
             new_merge = (self.merged & ~merged_before).any(2) & (self.goal_kind == 1)
-            self.ask = self.waiting | no_path | new_merge | (self.trip >= c.trip_max_steps)
+            failed = no_path | (self.trip >= c.trip_max_steps)
+            self.ask = self.waiting | failed | new_merge
+            if self.paths:          # settling: no events until the wait is over (then: no goal)
+                self.ask &= ~(self.settle > 0)
+                self.trip = torch.where(self.settle > 0, torch.zeros_like(self.trip), self.trip)
+            if self.outcome:        # a failed action (no path, too long a trip) is paid its costs only
+                self.opt_fail |= failed & ~(self.settle > 0 if self.paths else torch.zeros_like(failed))
         if c.slam_model:
             # map data arriving from teammates, and the place-recognition burst of a new merge
             gap = self._known_count(integrated=True) - self._known_count(integrated=False)
@@ -799,6 +996,8 @@ class ExploreEnv:
         first_success = success & ~self.ever_success                        # the bonus once, when it happens
         self.ever_success |= success
         done = (success & c.end_at_success) | (self.t >= self.max_t)
+        if self.outcome:
+            return self._outcome_step(done, team_before)
         reward = (c.w_team * (self.team_cov - old_tc) + c.w_know * (self.know_cov - old_kc)
                   - c.time_cost + c.success_bonus * first_success.float())
         if c.w_end_merged or c.w_end_unc:          # the map the team hands over at the end of the mission
@@ -824,6 +1023,13 @@ class ExploreEnv:
             mine = self.seen_free & self.target[:, None] & ~team_before[:, None]
             self.step_own = mine.flatten(2).sum(2) / self.n_target[:, None]
             reward = reward + c.w_own * self.step_own
+        info = self._done_info(done)
+        self._reset(done)
+        return self.observe(), reward, done, info
+
+    def _done_info(self, done):
+        """Statistics of the missions that end now."""
+        c, N = self.cfg, self.N
         info = {'done_team_cov': self.team_cov[done], 'done_know_cov': self.know_cov[done],
                 'done_steps': self.t[done], 'done_t90': self.t90[done], 'done_success': self.ever_success[done],
                 'done_dist': self.dist[done].mean(1), 'done_merged': self.merged[done].float().mean((1, 2)),
@@ -837,8 +1043,32 @@ class ExploreEnv:
             err = self.merge_err()[done]
             info.update({'done_lam2': self.lam2[done].mean(1), 'done_unc': self.unc[done].mean(1),
                          'done_merge_err': (err * mate).sum((1, 2)) / mate.sum((1, 2)).clamp(min=1)})
-        self._reset(done)
-        return self.observe(), reward, done, info
+        return info
+
+    def _outcome_step(self, done, team_before):
+        """reward_mode 'outcome': this step's gains and costs go to each robot's running action, which is
+        paid when it ends -- at the robot's next decision (observe: ask_now) or at the end of the mission. A
+        failed action (no path, too long a trip) is paid its costs only."""
+        c, B, N = self.cfg, self.B, self.N
+        mine = self.seen_free & self.target[:, None] & ~team_before[:, None]
+        self.step_own = mine.flatten(2).sum(2) / self.n_target[:, None]
+        self.opt_pos += c.w_cov * self.step_own + c.w_drift * self.step_drem + c.w_merge * self.step_mgain
+        self.opt_neg -= c.time_cost + c.w_drift * self.step_dadd
+        reward = torch.zeros(B, N, device=self.dev)
+        end = done[:, None].expand(B, N)                  # the mission ends: every action ends with it
+        reward = torch.where(end, self._payout(), reward)
+        info = self._done_info(done)
+        self._reset(done)                                 # (clears the accumulators of these missions)
+        obs = self.observe()
+        end = self.ask_now & ~done[:, None]               # deciding at the next step: the action has ended
+        reward = torch.where(end, self._payout(), reward)
+        for x in (self.opt_pos, self.opt_neg):
+            x.masked_fill_(end, 0.0)
+        self.opt_fail &= ~end
+        return obs, reward, done, info
+
+    def _payout(self):
+        return torch.where(self.opt_fail, self.opt_neg, self.opt_pos + self.opt_neg)
 
     def n_fixed(self):
         """Candidate slots that set no new goal: keep (0) and, in stage 2, wait (1)."""
@@ -862,11 +1092,21 @@ class ExploreEnv:
         # tracking loss while moving
         p = c.lost_p0 + c.lost_lag * torch.sigmoid((lag - c.lag_crit) / c.lag_scale) + c.lost_turn * turn / math.pi
         newly = moving & ~lost_now & (self._rand(B, N) < p)
+        recover = torch.full_like(p, c.lost_recover)
+        if c.lost_manoeuvre:                       # a manoeuvre this tick (_drive, _start_turn)
+            man = self.manoeuvre & ~lost_now & ~newly & (self._rand(B, N) < c.lost_manoeuvre)
+            recover = torch.where(man, torch.full_like(p, c.lost_man_recover), recover)
+            newly = newly | man
+            self.manoeuvre.zero_()
+        if c.lost_manoeuvre or c.lost_recover < 1.0:                     # (no extra draw for the old model)
+            self.lost_for_good |= newly & (self._rand(B, N) >= recover)  # never relocalizes
         self.lost = torch.where(newly, torch.full_like(self.lost, c.lost_ticks), (self.lost - 1).clamp(min=0))
+        self.lost = torch.where(self.lost_for_good, torch.full_like(self.lost, c.lost_ticks), self.lost)
         self.step_lost += (self.lost > 0).float().sum(1)
         # drift
         metres = 0.1 * steplen
-        self.drift = self.drift + c.drift_rate * metres * (1 + c.drift_lag * lag) + c.lost_drift * newly.float()
+        added = c.drift_rate * metres * (1 + c.drift_lag * lag) + c.lost_drift * newly.float()
+        self.drift = self.drift + added
         drift_before = self.drift
         avoidable = c.drift_rate * metres * c.drift_lag * self.backlog + c.lost_drift * newly.float()
         self.since_corr = self.since_corr + metres
@@ -877,16 +1117,19 @@ class ExploreEnv:
         fs_here = self.first_seen[bi, ni, py, px]                                  # (B, N) my first look at my cell
         tick = self.tick[:, None]
         ok = ~(self.lost > 0)
+        then_tick = None
         if c.loop_model == 'views':
             # seeing enough of its own old views again, from a similar direction: ORB-SLAM3 place recognition
             loop = (ok & moving & (self.old_views >= c.loop_views) & (tick - self.last_loop >= c.loop_cooldown)
                     & (self._rand(B, N) < c.loop_rate * c.tick_s))
+        elif c.loop_model == 'kf':
+            loop, then_tick = self._kf_loops(moving, ok, tick)
         else:
             loop = (ok & moving & (fs_here >= 0) & (tick - fs_here >= c.loop_age)
                     & (tick - self.last_loop >= c.loop_cooldown) & (self._rand(B, N) < c.p_loop))
         cut = torch.full_like(self.drift, c.loop_gain)
-        if self.graph and c.loop_model == 'views' and loop.any():
-            cut = self._loop_edges(loop)                                   # share of the uncertainty removed
+        if self.graph and c.loop_model in ('views', 'kf') and loop.any():
+            cut = self._loop_edges(loop, then_tick)                        # share of the uncertainty removed
         self.drift = torch.where(loop, self.drift * (1 - cut), self.drift)
         self.last_loop = torch.where(loop, tick.expand(B, N), self.last_loop)
         mate = self.merged & ~torch.eye(N, dtype=torch.bool, device=d)
@@ -921,6 +1164,20 @@ class ExploreEnv:
         self.last_link = torch.where(link, tick[..., None].expand(B, N, N), self.last_link)
         self.since_corr = torch.where(loop | any_link, torch.zeros_like(self.since_corr), self.since_corr)
         self.step_drift += (avoidable - (drift_before - self.drift)).sum(1)
+        if self.outcome:
+            self.step_dadd += added
+            self.step_drem += (drift_before - self.drift).clamp(min=0)
+        if self.paths:
+            # the correction a revisit path is for: a loop closure (own path) or a link with that teammate
+            on = (self.wp_i < c.path_poses) | (self.settle > 0)
+            mate_link = link.gather(2, self.goal_mate.clamp(min=0)[..., None]).squeeze(-1) & (self.goal_mate >= 0)
+            self.confirmed |= on & (((self.goal_kind == 3) & loop) | ((self.goal_kind == 2) & mate_link))
+            # each robot's cell and motion so far at this tick (revisit paths follow them)
+            t_ = self.tick.clamp(max=self.TT - 1)
+            self.moved += moving.long()
+            bi_, ni_ = torch.arange(B, device=d)[:, None], torch.arange(N, device=d)[None]
+            self.path_log[bi_, ni_, t_[:, None]] = self.pos.to(torch.int16)
+            self.move_log[bi_, ni_, t_[:, None]] = self.moved.clamp(max=self.MOVE_END - 1).to(torch.int16)
         if self.graph:
             self.mticks += moving.long()
             if self.node_at is not None:
@@ -928,6 +1185,29 @@ class ExploreEnv:
                 self.node_at[torch.arange(B, device=d)[:, None], torch.arange(N, device=d)[None], t_[:, None]] = \
                     (self.mticks // c.node_ticks).clamp(max=self.M - 1).to(torch.int16)
         self.tick += 1
+
+    def _kf_loops(self, moving, ok, tick):
+        """loop_model 'kf' (EnvConfig): ORB-SLAM3's loop rule. Returns the loops that land now (B, N) and
+        the tick of the oldest own view each one closes on."""
+        c, B, N = self.cfg, self.B, self.N
+        self.kf_acc += moving.long()
+        kf = moving & ok & (self.kf_acc >= c.kf_ticks)                     # a new keyframe
+        self.kf_acc = torch.where(kf, torch.zeros_like(self.kf_acc), self.kf_acc)
+        hit = kf & (self.old_views >= c.loop_views) & (self._rand(B, N) < c.kf_match)
+        miss = kf & ~hit & (self.coin > 0)
+        self.coin = torch.where(hit, self.coin + 1, self.coin)
+        self.miss = torch.where(hit, torch.zeros_like(self.miss), torch.where(miss, self.miss + 1, self.miss))
+        lose = self.miss >= c.loop_miss
+        self.coin = torch.where(lose, torch.zeros_like(self.coin), self.coin)
+        self.miss = torch.where(lose, torch.zeros_like(self.miss), self.miss)
+        conf = (self.coin >= c.loop_confirm) & (self.loop_due < 0) & (tick - self.last_loop >= c.loop_cooldown)
+        delay = torch.ceil((c.loop_latency_s + self.backlog) / c.tick_s).long()
+        self.loop_due = torch.where(conf, tick + delay, self.loop_due)
+        self.loop_then = torch.where(conf, self.old_view_tick, self.loop_then)
+        self.coin = torch.where(conf, torch.zeros_like(self.coin), self.coin)
+        loop = (self.loop_due >= 0) & (tick >= self.loop_due)
+        self.loop_due = torch.where(loop, torch.full_like(self.loop_due, -1), self.loop_due)
+        return loop, self.loop_then
 
     def _view_match(self):
         """How well each robot's current view matches each teammate's past views
@@ -975,15 +1255,17 @@ class ExploreEnv:
         """(B, i, j) merge error one more link would remove, in units of merge_err0()."""
         return (self._merr(self.links) - self._merr(self.links + 1)) / self.merge_err0()
 
-    def _loop_edges(self, loop):
+    def _loop_edges(self, loop, then_tick=None):
         """Loop closures go into each robot's own graph, from its newest node (as of the
-        last decision) to the node of the oldest own view in sight; the uncertainty they
-        remove is rewarded. Returns (B, N): the share of the uncertainty removed."""
+        last decision) to the node of the oldest own view in sight (then_tick: of that view,
+        (B, N), default the one in sight now); the uncertainty they remove is rewarded.
+        Returns (B, N): the share of the uncertainty removed."""
         c, M, N = self.cfg, self.M, self.N
         b, i = loop.nonzero(as_tuple=True)
         seen = self.obs_nodes[b, i]
         now = torch.minimum(self.cur_node()[b, i], seen)
-        then = torch.minimum(self.node_of(b, i, self.old_view_tick[b, i]), seen)
+        old = (self.old_view_tick if then_tick is None else then_tick)[b, i]
+        then = torch.minimum(self.node_of(b, i, old), seen)
         du = torch.where(then < now, self.loop_node_gain[b, i, then], torch.zeros_like(now, dtype=torch.float))
         self.step_unc.index_add_(0, b, du)
         share = torch.zeros(self.B, N, device=self.dev)
@@ -1022,6 +1304,8 @@ class ExploreEnv:
         mine, theirs = i * M + now, j * M + then
         self.step_conn.index_add_(0, b, self._edge_gain(b, i, mine, theirs))
         self.step_merge.index_add_(0, b, self.merge_gain()[b, i, j])
+        if self.outcome:
+            self.step_mgain.index_put_((b, i), self.merge_gain()[b, i, j], accumulate=True)
         self.gedge[b, i, mine, theirs] += 1.0
         self.gedge[b, i, theirs, mine] += 1.0
 
@@ -1107,6 +1391,8 @@ class ExploreEnv:
         n, HW = c.n_self_revisit, H * W
         tt = self.trail_tick.view(B, N, HW).long()                                  # my own last visit per cell
         old = (tt >= 0) & (self.tick[:, None, None] - tt >= c.loop_age)
+        if self.paths:                                                              # its path on from there is long enough
+            old &= self._path_room(tt)
         node = ((tt // c.node_ticks).clamp(0, M - 1) if self.node_at is None
                 else self.node_at.gather(2, tt.clamp(0, self.T - 1)).long())
         gain = self.loop_node_gain.gather(2, node)                                 # (B, N, HW)
@@ -1117,7 +1403,29 @@ class ExploreEnv:
         flat = cells[..., 0] * W + cells[..., 1]
         yaw = self.trail_head.view(B, N, HW).gather(2, flat)
         self.cand_yaw[..., s0:s0 + n] = torch.where(cok, yaw, torch.full((), float('nan'), device=d))
+        if self.paths:
+            self.cand_wp[..., s0:s0 + n, :, :] = self._path_from(torch.arange(N, device=d)[None, :, None].expand(B, N, n), flat)
         return cells, cok, gain.gather(2, flat) * cok
+
+    def _path_room(self, tt):
+        """(B, N, HW) bool: robot n's path goes on from its last visit of each cell (tt, ticks) for the
+        (path_poses - 1) x path_spacing ticks of motion a revisit path needs."""
+        c = self.cfg
+        at = self.move_log.gather(2, tt.clamp(0, self.TT - 1)).long()
+        return (tt >= 0) & (at + (c.path_poses - 1) * c.path_spacing <= self.moved[..., None])
+
+    def _path_from(self, j, flat):
+        """Revisit paths of slots (B, N, n) at cells `flat` of robot j's path (j: (B, N, n)): the path_poses
+        cells of j's path from its last visit there on, path_spacing ticks of its motion apart (B, N, n, P, 2)."""
+        c, B, N, d = self.cfg, self.B, self.N, self.dev
+        n = flat.shape[2]
+        bi = torch.arange(B, device=d)[:, None, None].expand(B, N, n)
+        tau = self.trail_tick.view(B, N, -1)[bi, j, flat].long().clamp(0, self.TT - 1)
+        m0 = self.move_log[bi, j, tau].long()
+        target = (m0[..., None] + c.path_spacing * torch.arange(c.path_poses, device=d)).int()
+        seq = self.move_log[bi, j].int()                                               # (B, N, n, TT), sorted
+        tk = torch.searchsorted(seq.contiguous(), target.contiguous()).clamp(max=self.TT - 1)
+        return self.path_log[bi[..., None], j[..., None], tk].long()
 
     @staticmethod
     def _lam2_feat(lam2):
@@ -1132,6 +1440,8 @@ class ExploreEnv:
         n_rev, n0, HW = c.n_revisit, self.n_fixed(), H * W
         tt = self.trail_tick.view(B, 1, N, HW)
         visited = (tt >= 0) & mate[..., None]                                      # (B, i, j, HW)
+        if self.paths:                                                              # j's path on from there is long enough
+            visited &= self._path_room(tt[:, 0].long())[:, None]
         conn = mg = None
         if self.graph:
             M = self.M
@@ -1158,6 +1468,8 @@ class ExploreEnv:
         yaw = head[torch.arange(B, device=d)[:, None, None], j, flat]
         self.cand_yaw[..., n0:n0 + n_rev] = torch.where(rok, yaw, torch.full((), float('nan'), device=d))
         self.cand_mate[..., n0:n0 + n_rev] = torch.where(rok, j, torch.full((), -1, dtype=torch.long, device=d))
+        if self.paths:
+            self.cand_wp[..., n0:n0 + n_rev, :, :] = self._path_from(j, flat)
         if not self.graph:
             return cells, rok, None, None
         rc = conn.gather(3, flat[:, :, None, :].expand(B, N, N, n_rev)).gather(2, j[:, :, None]).squeeze(2)
@@ -1267,6 +1579,10 @@ class ExploreEnv:
             self.goal_left_now = ig[bk[..., 0], nk[..., 0], gy, gx] / self.ig_norm
             used = (self.goal_kind == 1) & self.has_goal & (self.goal_left_now < c.goal_left * self.goal_gain0)
             self.ask_now = self.ask | used | ~self.has_goal
+            if self.paths:            # waiting for the correction after a revisit path: KEEP (stand) only
+                settling = self.settle > 0
+                self.ask_now &= ~settling
+                self.cand_mask[..., 0] |= settling
             self.cand_mask[..., 1:] &= self.ask_now[..., None]
         K = c.n_candidates
         # the heading a robot arrives with: the direction of the last step of its shortest path to the goal
@@ -1332,6 +1648,13 @@ class ExploreEnv:
             is_own[..., n_fixed + n_rev:n_fixed + n_rev + n_own] = 1
             ug[..., n_fixed + n_rev:n_fixed + n_rev + n_own] = (own_gain / 2.0).clamp(max=2)
             feats += [is_own, ug]
+        if c.cand_bearing:   # where the candidate lies from the way the robot faces (behind or beside: a manoeuvre)
+            brg = torch.atan2(rel[..., 0], rel[..., 1]) - self.heading[..., None]
+            on_cell = (rel == 0).all(-1)
+            slot = torch.arange(K, device=d)[None, None]
+            turn_round = torch.where(slot >= n_fixed, torch.full_like(brg, math.pi), torch.zeros_like(brg))
+            brg = torch.where(on_cell, turn_round, brg)                     # a goal on its own cell: turn around
+            feats += [torch.cos(brg), torch.sin(brg)]
         cand_feat = torch.stack(feats, -1)
         # teammate features (known only once merged)
         rel_p = (ppos[:, None] - ppos[:, :, None])                                 # (B, N, N, 2): j relative to i
@@ -1365,7 +1688,7 @@ class ExploreEnv:
                  ((free | occ).flatten(2).sum(2).float() / (Hs * Ws)).clamp(max=8.0),
                  mate.float().sum(2) / max(1, N - 1), self.has_goal.float()]
         if c.slam_model:     # what the robot's SLAM node publishes about itself
-            slist += [(self.backlog / 3.0).clamp(max=3), (self.lost > 0).float(), self.lost.float() / c.lost_ticks,
+            slist += [(self.backlog / 3.0).clamp(max=3), (self.lost > 0).float(), (self.lost.float() / c.lost_ticks).clamp(max=1),
                       (self.since_corr / 5.0).clamp(max=2),
                       (self.links.sum(2) / (c.link_cap * max(1, N - 1))).clamp(max=1)]
         if self.graph:       # algebraic connectivity of my own pose graph (log scale)
@@ -1389,6 +1712,12 @@ class ExploreEnv:
         if n_own:
             sslist.append((self.unc.mean(1) / 10.0).clamp(max=3))
         state_scalars = torch.stack(sslist, -1)
+        if self.outcome:
+            # per robot: what its running action has gained and cost so far (paid when it ends) and whether it
+            # is on a revisit path (or waiting at its end), so the value of a step can include what is pending
+            busy = ((self.wp_i < c.path_poses) | (self.settle > 0)).float() if self.paths else torch.zeros(B, N, device=d)
+            state_scalars = torch.cat([state_scalars[:, None].expand(B, N, -1),
+                                       torch.stack([self.opt_pos.clamp(-5, 5), self.opt_neg.clamp(-5, 5), busy], -1)], -1)
         if self.graph:
             self.unc_prev = self.unc.mean(1)          # the uncertainty this step starts from (unc_reward 'change')
         out = {'planes': planes.to(torch.uint8), 'cand': cand_feat, 'cand_mask': self.cand_mask,

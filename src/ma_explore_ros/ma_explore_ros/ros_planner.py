@@ -1,4 +1,4 @@
-# Copied from ma_explore (fbdfb24) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (6789422+changes) by ma_explore.robot_package: edit it there, not here.
 """ROS 2 planner for one robot: picks its next exploration goal and sends it to Nav2.
 
     python -m ma_explore.ros_planner --ros-args -p agent:=sim_1 -p agents:="sim_1 sim_2 sim_3" \\
@@ -23,8 +23,8 @@ Output: NavigateToPose goals on /<agent>/navigate_to_pose, the goal on
 and the map it decided on on /ma_explore/<agent>/known_map (for the views).
 
 Frames are '<a>/map_nav' etc. (several robots on one /tf: Isaac, or real robots
-with run_slam3.sh --ma-frames); -p frame_prefix:=none uses plain 'map_nav' (one
-real robot with run_slam3.sh --nav). The policy's team size (the training
+with run_slam.sh --ma-frames); -p frame_prefix:=none uses plain 'map_nav' (one
+real robot with run_slam.sh --nav). The policy's team size (the training
 config's n_agents) is kept: robots that are not there count as never merged, so
 one robot alone explores as a robot does before its first merge.
 
@@ -86,6 +86,13 @@ decision, about `wait_s` seconds.
 
 With pose_revisit, a revisit goal is a merged teammate's past pose: Nav2 gets
 the heading the teammate had there (the same view, for place recognition).
+With revisit_path (16 Oct 2026), a revisit (a teammate's or the robot's own
+older path) is several poses of that path: Nav2 gets them one after the other,
+the first with the heading the robot had there, the others with the heading
+along the path; after the last the car waits up to settle_s for the correction
+the revisit is for (an own loop closure in slam_metrics, or a new link with
+that teammate in ma_links) and decides as soon as it comes. Events do not
+interrupt a revisit path; a failed goal ends it.
 With graph_model, the planner keeps its own pose-graph edges with each
 teammate as training does: the merge match, then one per new link in ma_links
 (minus the count at the merge: the merge match's own measurements), each
@@ -205,7 +212,7 @@ class Planner(Node):
         assert self.me in self.agents
         self.others = [a for a in self.agents if a != self.me]
         # TF frames: '<agent>/map_nav' (several robots on one /tf: Isaac, or real robots started
-        # with run_slam3.sh --ma-frames), or plain 'map_nav' (frame_prefix:=none: one real robot)
+        # with run_slam.sh --ma-frames), or plain 'map_nav' (frame_prefix:=none: one real robot)
         self.prefixed = p('frame_prefix', 'agent') != 'none'
         torch.set_num_threads(2)
         pol, env_cfg, H = load_policy(policy, device, p('env_config', ''))   # env_config: baselines only
@@ -230,6 +237,10 @@ class Planner(Node):
             self.decide_on = 'events' if env_cfg.event_decisions else 'distance'
         assert self.decide_on in ('events', 'distance'), self.decide_on
         self.trip_max_s = env_cfg.trip_max_steps * env_cfg.ticks * env_cfg.tick_s
+        # revisit paths (env revisit_path): the poses still to drive, then a wait of up to settle_s for the
+        # correction they are for (an own loop closure, or a new link with that teammate)
+        self.settle_s = env_cfg.settle_s if env_cfg.revisit_path else 0.0
+        self.path, self.settle_until, self.confirm = [], None, None
         self.goal_left = env_cfg.goal_left
         self.policy_name = policy
         # warm up (the first call compiles the path-distance kernel)
@@ -389,7 +400,7 @@ class Planner(Node):
         one per loop_cooldown ticks). ORB-SLAM3's explicit loop closures (slam_metrics corrections
         without a new merge) add one too."""
         c = self.decider.cfg
-        if not (self.decider.env.graph and c.loop_model == 'views') or not self.tposes[self.me]:
+        if not (self.decider.env.graph and c.loop_model in ('views', 'kf')) or not self.tposes[self.me]:
             return
         now_tick = self.tick_now()
         x, y, yaw = self.pose[self.me]
@@ -401,7 +412,9 @@ class Planner(Node):
         self.corrections = corr
         self.reobs_s = self.reobs_s + dt if old else 0.0
         cool = (time.monotonic() - self.last_loop_t) >= c.loop_cooldown * c.tick_s
-        if old and cool and (explicit or self.reobs_s * c.loop_rate >= 1.0):
+        # loop_model 'kf': ORB-SLAM3's own loop closures only (its three-keyframe rule is the real one here)
+        fire = explicit if c.loop_model == 'kf' else (explicit or self.reobs_s * c.loop_rate >= 1.0)
+        if old and cool and fire:
             then = min(p[3] for p in old)
             self.own_edges.append((self.node(self.me, now_tick), self.node(self.me, then)))
             self.reobs_s, self.last_loop_t = 0.0, time.monotonic()
@@ -557,6 +570,7 @@ class Planner(Node):
             self.get_logger().info(f'{self.me}: SLAM pose back after {now - self.lost_since:.1f} s')
             self.lost_since = None
             self.goal, self.goal_yaw, self.paused_until, self.next_ok = None, None, None, now
+            self.end_path()
             self.publish_goal()
         if not self.enabled:
             return
@@ -579,13 +593,20 @@ class Planner(Node):
                     self.goal_handle.cancel_goal_async()
                 self.goal, self.goal_yaw, self.near_since = None, None, None
                 self.publish_goal()
-                self.decide('close enough')
+                if not self.path_step(now):
+                    self.decide('close enough')
                 return
         else:
             self.near_since = None
         if self.paused_until is not None:
             if now >= self.paused_until:
                 self.decide('waited')
+            return
+        if self.settle_until is not None:           # at the end of a revisit path: wait for its correction
+            ok = self.path_confirmed()
+            if ok or now >= self.settle_until:
+                self.settle_until, self.confirm = None, None
+                self.decide('correction came' if ok else 'settled')
             return
         if self.goal is None:
             reason = 'no goal' if now >= self.next_ok else None
@@ -668,6 +689,12 @@ class Planner(Node):
         self.publish_known(res)
         paused, self.paused_until = self.paused_until is not None, None
         if res['goal'] is not None:
+            self.end_path()
+            if res.get('waypoints'):                # a revisit path: its first pose now, the others in turn
+                wps = res['waypoints']
+                self.path = [tuple(w) for w in wps[1:]]
+                self.confirm = self.confirm_ref(res['kind'], self.others[res['mate'] - 1] if res.get('mate') else None)
+                res['goal'], res['goal_yaw'] = (wps[0][0], wps[0][1]), wps[0][2]
             gyaw = res.get('goal_yaw')
             if gyaw is None and math.dist(res['goal'], (x, y)) < 0.15:
                 # a goal on its own cell (the unknown is behind the camera): turn around, as in training;
@@ -698,6 +725,7 @@ class Planner(Node):
             'decision': self.t_decisions, 'kind': kind, 'mate': mate, 'reason': reason,
             'goal': None if self.goal is None else [float(self.goal[0]), float(self.goal[1])],
             'goal_yaw': self.goal_yaw, 'wait_s': self.wait_s if kind == 'wait' else 0.0,
+            'waypoints': res.get('waypoints'),
             'links': {a: self.links.get(a, 0) for a in merged}, 'backlog': round(float(self.backlog()), 2),
             'since_corr': round(float(self.metrics[10]), 2), 'pose': [float(x), float(y), float(yaw)],
             'mates': {a: [float(v) for v in r.pose] for a, r in zip(self.others, robots[1:]) if r.known},
@@ -835,6 +863,7 @@ class Planner(Node):
                 self.goal_seq += 1
                 self.goal_handle.cancel_goal_async()
             self.goal, self.goal_yaw, self.paused_until = None, None, None
+            self.end_path()
             self.publish_goal()
 
     def frame(self, a, name):
@@ -917,8 +946,52 @@ class Planner(Node):
                 self.get_logger().info(msg)
             self.goal = None
             self.publish_goal()
+            if st == GoalStatus.STATUS_SUCCEEDED:
+                self.path_step(time.monotonic())
+            else:
+                self.end_path()
+
+    # ── revisit paths ─────────────────────────────────────────────────────
+    def confirm_ref(self, kind, mate):
+        """What the correction of a revisit path will look like: a loop closure of my own map (own path), or
+        a new link with that teammate; counted from now."""
+        if not self.settle_s:
+            return None
+        if kind == 'loop':
+            return {'kind': 'loop', 'corr': self.metrics[11], 'edges': len(self.own_edges)}
+        return {'kind': 'link', 'mate': mate, 'links': self.links.get(mate, 0)}
+
+    def path_confirmed(self):
+        cf = self.confirm
+        if cf is None:
+            return False
+        if cf['kind'] == 'loop':
+            loop = self.metrics[11] > cf['corr'] and time.monotonic() - self.last_new_merge_t > 10.0
+            return loop or len(self.own_edges) > cf['edges']
+        return self.links.get(cf['mate'], 0) > cf['links']
+
+    def path_step(self, now):
+        """A pose of a revisit path reached: on to the next one, or (the last) wait for the correction unless
+        it has come. Returns False when there is no revisit path (decide as usual)."""
+        if self.path:
+            x, y, yaw = self.path.pop(0)
+            self.goal_t0 = now                      # each leg is a trip of its own (training: trip per pose)
+            self.send((x, y), yaw)
+            return True
+        if self.confirm is None:
+            return False
+        if self.path_confirmed():
+            self.confirm = None
+            return False
+        self.settle_until = now + self.settle_s
+        self.get_logger().info(f'{self.me}: end of the revisit path: waiting up to {self.settle_s:.0f} s for the correction')
+        return True
+
+    def end_path(self):
+        self.path, self.settle_until, self.confirm = [], None, None
 
     def fail(self, goal, why):
+        self.end_path()
         self.get_logger().info(f'{self.me}: goal ({goal[0]:.2f}, {goal[1]:.2f}) {why}; blocked for {self.block_time:.0f} s')
         now = time.monotonic()
         self.blocked.append((goal[0], goal[1], now + self.block_time, 0.3, 'failed'))

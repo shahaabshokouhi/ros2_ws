@@ -1,15 +1,11 @@
 # The trained network
 
-Copy the network to use into this folder as `policy.pt`:
+`policy.pt` is the policy the robots run (`./run_slam.sh --explore`). A finished training run
+on the PC copies it here by itself (ma_explore `train.publish_to_robot`, on for
+`configs/slam_aware.yaml`), together with the planner code it was trained with
+(`../ma_explore_ros/`), and writes `POLICY_FROM` (which checkpoint, how many steps). Then
+commit and push ros2_ws on the PC, and `git pull` on each robot: no rebuild is needed for
+the policy itself.
 
-    scp <PC>:~/result/ma_explore/runs/<run>/checkpoints/robot_policy.pt \
-        ~/ros2_ws/src/ma_explore_ros/policy/policy.pt    # the robots: ~/ros2_ws
-
-`robot_policy.pt` is written at the end of every training run (the best
-checkpoint's actor and settings, about 2.5 MB); the training log and the run's
-report (`<run>/report/report.html`) say which file it is. A full `best.pt` works
-too. No rebuild is needed after copying. Check what is installed:
-
-    ros2 run ma_explore_ros policy_info
-
-`*.pt` files are not committed (this folder's .gitignore).
+By hand, on the PC: `python -m ma_explore.robot_package RUN_DIR` (in ~/ma_explore).
+Check what is installed: `ros2 run ma_explore_ros policy_info`.

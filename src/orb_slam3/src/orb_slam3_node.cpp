@@ -1,9 +1,10 @@
-// ORB-SLAM3 multi-agent ROS 2 node — counterpart of orb_slam2/orb_slam_node.cpp.
+// ORB-SLAM3 multi-agent ROS 2 node.
 //
-// Wire compatibility: reuses orbslam2_msgs and the SAME inter-agent topics
-// (/orb_slam2/single_mappoint, /orb_slam2/mappoints), so ORB-SLAM2 and
-// ORB-SLAM3 agents can exchange map points in a mixed fleet. Per-agent
-// visualization topics are published under the orb_slam3 prefix.
+// Inter-agent messages: orbslam3_msgs, on the shared topics /orb_slam3/...
+// (mappoints, single_mappoint, kf_bow, agent_request, camera_calib, kf_data,
+// owner_update, back_observations). Per-agent topics are /<agent>/orb_slam3/...
+// (until 15 Oct 2026 the shared topics and messages were named orb_slam2 /
+// orbslam2_msgs, from the ORB-SLAM2 node they were first written for).
 //
 // Main-map policy (implemented in the ORB_SLAM3 library): only points from
 // the agent's qualified MAIN map are popped for sharing; while the robot is
@@ -34,19 +35,19 @@
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/multi_array_dimension.hpp>
 
-#include <orbslam2_msgs/msg/map_point.hpp>
-#include <orbslam2_msgs/msg/map_point_array.hpp>
-#include <orbslam2_msgs/msg/key_frame_bo_w.hpp>
+#include <orbslam3_msgs/msg/map_point.hpp>
+#include <orbslam3_msgs/msg/map_point_array.hpp>
+#include <orbslam3_msgs/msg/key_frame_bo_w.hpp>
 #include <execinfo.h>
 #include <csignal>
 #include <unistd.h>
-#include <orbslam2_msgs/msg/agent_request.hpp>
-#include <orbslam2_msgs/msg/camera_calib.hpp>
-#include <orbslam2_msgs/msg/key_frame_data.hpp>
-#include <orbslam2_msgs/msg/owner_update.hpp>
+#include <orbslam3_msgs/msg/agent_request.hpp>
+#include <orbslam3_msgs/msg/camera_calib.hpp>
+#include <orbslam3_msgs/msg/key_frame_data.hpp>
+#include <orbslam3_msgs/msg/owner_update.hpp>
 #include <rclcpp/serialization.hpp>
 #include <fstream>
-#include <orbslam2_msgs/msg/back_observations.hpp>
+#include <orbslam3_msgs/msg/back_observations.hpp>
 
 #include <MapPoint.h>
 #include <System.h>
@@ -213,27 +214,27 @@ public:
                 agent_name_ + "/orb_slam3/pose", 10);
             // Inter-agent topics: identical to the ORB-SLAM2 node for wire
             // compatibility in a mixed fleet — do not rename.
-            mappoint_pub_ = this->create_publisher<orbslam2_msgs::msg::MapPointArray>(
-                "orb_slam2/mappoints", 10);
-            single_mappoint_pub_ = this->create_publisher<orbslam2_msgs::msg::MapPoint>(
-                "orb_slam2/single_mappoint", qos);
-            kf_bow_pub_ = this->create_publisher<orbslam2_msgs::msg::KeyFrameBoW>(
-                "orb_slam2/kf_bow", qos);
+            mappoint_pub_ = this->create_publisher<orbslam3_msgs::msg::MapPointArray>(
+                "orb_slam3/mappoints", 10);
+            single_mappoint_pub_ = this->create_publisher<orbslam3_msgs::msg::MapPoint>(
+                "orb_slam3/single_mappoint", qos);
+            kf_bow_pub_ = this->create_publisher<orbslam3_msgs::msg::KeyFrameBoW>(
+                "orb_slam3/kf_bow", qos);
             // On-demand KF exchange ("new" method). Global topics so every
             // agent both requests and answers — distributed & symmetric.
             // `qos` is reliable + deep, so requests/replies are not dropped.
-            agent_req_pub_ = this->create_publisher<orbslam2_msgs::msg::AgentRequest>(
-                "orb_slam2/agent_request", qos);
-            calib_pub_ = this->create_publisher<orbslam2_msgs::msg::CameraCalib>(
-                "orb_slam2/camera_calib", qos);
-            kf_data_pub_ = this->create_publisher<orbslam2_msgs::msg::KeyFrameData>(
-                "orb_slam2/kf_data", qos);
+            agent_req_pub_ = this->create_publisher<orbslam3_msgs::msg::AgentRequest>(
+                "orb_slam3/agent_request", qos);
+            calib_pub_ = this->create_publisher<orbslam3_msgs::msg::CameraCalib>(
+                "orb_slam3/camera_calib", qos);
+            kf_data_pub_ = this->create_publisher<orbslam3_msgs::msg::KeyFrameData>(
+                "orb_slam3/kf_data", qos);
             // Ownership ("new" method): owners broadcast what moved; copy
             // holders send their sightings of an owner's landmarks back to it.
-            owner_update_pub_ = this->create_publisher<orbslam2_msgs::msg::OwnerUpdate>(
-                "orb_slam2/owner_update", qos);
-            back_obs_pub_ = this->create_publisher<orbslam2_msgs::msg::BackObservations>(
-                "orb_slam2/back_observations", qos);
+            owner_update_pub_ = this->create_publisher<orbslam3_msgs::msg::OwnerUpdate>(
+                "orb_slam3/owner_update", qos);
+            back_obs_pub_ = this->create_publisher<orbslam3_msgs::msg::BackObservations>(
+                "orb_slam3/back_observations", qos);
             path_pub_ = this->create_publisher<nav_msgs::msg::Path>(
                 agent_name_ + "/orb_slam3/path", 10);
             // image_plane_pub_ disabled — image-plane point-cloud publishing
@@ -272,32 +273,32 @@ public:
             using std::placeholders::_1;
             // Left in the node's default callback group -> handled by the
             // auxiliary executor, never on the tracking thread.
-            mappoint_sub_ = this->create_subscription<orbslam2_msgs::msg::MapPoint>(
-                "/orb_slam2/single_mappoint", qos,
+            mappoint_sub_ = this->create_subscription<orbslam3_msgs::msg::MapPoint>(
+                "/orb_slam3/single_mappoint", qos,
                 std::bind(&ORBSLAM3Node::importMapPointCallback, this, _1));
             // Batched sharing channel (default). All updated agents publish and
             // consume MapPointArray; the single-point sub above stays for a
             // mixed fleet with legacy publishers.
-            mappoint_array_sub_ = this->create_subscription<orbslam2_msgs::msg::MapPointArray>(
-                "/orb_slam2/mappoints", qos,
+            mappoint_array_sub_ = this->create_subscription<orbslam3_msgs::msg::MapPointArray>(
+                "/orb_slam3/mappoints", qos,
                 std::bind(&ORBSLAM3Node::importMapPointArrayCallback, this, _1));
-            kf_bow_sub_ = this->create_subscription<orbslam2_msgs::msg::KeyFrameBoW>(
-                "/orb_slam2/kf_bow", qos,
+            kf_bow_sub_ = this->create_subscription<orbslam3_msgs::msg::KeyFrameBoW>(
+                "/orb_slam3/kf_bow", qos,
                 std::bind(&ORBSLAM3Node::importKeyFrameBoWCallback, this, _1));
-            agent_req_sub_ = this->create_subscription<orbslam2_msgs::msg::AgentRequest>(
-                "/orb_slam2/agent_request", qos,
+            agent_req_sub_ = this->create_subscription<orbslam3_msgs::msg::AgentRequest>(
+                "/orb_slam3/agent_request", qos,
                 std::bind(&ORBSLAM3Node::agentRequestCallback, this, _1));
-            calib_sub_ = this->create_subscription<orbslam2_msgs::msg::CameraCalib>(
-                "/orb_slam2/camera_calib", qos,
+            calib_sub_ = this->create_subscription<orbslam3_msgs::msg::CameraCalib>(
+                "/orb_slam3/camera_calib", qos,
                 std::bind(&ORBSLAM3Node::cameraCalibCallback, this, _1));
-            kf_data_sub_ = this->create_subscription<orbslam2_msgs::msg::KeyFrameData>(
-                "/orb_slam2/kf_data", qos,
+            kf_data_sub_ = this->create_subscription<orbslam3_msgs::msg::KeyFrameData>(
+                "/orb_slam3/kf_data", qos,
                 std::bind(&ORBSLAM3Node::keyFrameDataCallback, this, _1));
-            owner_update_sub_ = this->create_subscription<orbslam2_msgs::msg::OwnerUpdate>(
-                "/orb_slam2/owner_update", qos,
+            owner_update_sub_ = this->create_subscription<orbslam3_msgs::msg::OwnerUpdate>(
+                "/orb_slam3/owner_update", qos,
                 std::bind(&ORBSLAM3Node::ownerUpdateCallback, this, _1));
-            back_obs_sub_ = this->create_subscription<orbslam2_msgs::msg::BackObservations>(
-                "/orb_slam2/back_observations", qos,
+            back_obs_sub_ = this->create_subscription<orbslam3_msgs::msg::BackObservations>(
+                "/orb_slam3/back_observations", qos,
                 std::bind(&ORBSLAM3Node::backObservationsCallback, this, _1));
 
             // Background worker thread: processes ImportHighQualityMapPoints
@@ -475,7 +476,7 @@ private:
         }
 
         // Create MapPointArray message
-        orbslam2_msgs::msg::MapPointArray mappoints_msg;
+        orbslam3_msgs::msg::MapPointArray mappoints_msg;
         mappoints_msg.header.stamp = color_msg->header.stamp;
         mappoints_msg.header.frame_id = camera_frame_;
         mappoints_msg.agent_name = agent_name_;
@@ -708,8 +709,8 @@ private:
         }
     }
 
-    orbslam2_msgs::msg::MapPoint toMsg(ORB_SLAM3::MapPoint* pMP) {
-        orbslam2_msgs::msg::MapPoint m;
+    orbslam3_msgs::msg::MapPoint toMsg(ORB_SLAM3::MapPoint* pMP) {
+        orbslam3_msgs::msg::MapPoint m;
         // ID
         m.agent_name = agent_name_;
         m.id = static_cast<uint64_t>(pMP->mnId);
@@ -841,7 +842,7 @@ private:
         if (slam_->mpMA->GetMAMethod() == "new") {
             auto pendingBows = slam_->mpMA->GetPendingBoWs();
             for (const auto& entry : pendingBows) {
-                orbslam2_msgs::msg::KeyFrameBoW msg;
+                orbslam3_msgs::msg::KeyFrameBoW msg;
                 msg.keyframe_id = entry.kf_id;
                 msg.agent_name = agent_name_;
                 msg.stamp = now;
@@ -876,11 +877,11 @@ private:
             // Publish whatever the MA thread queued this cycle (calibration
             // pulls and full-KF pulls share one message type).
             for (const auto& r : slam_->mpMA->GetPendingRequests()) {
-                orbslam2_msgs::msg::AgentRequest req;
+                orbslam3_msgs::msg::AgentRequest req;
                 req.request_type =
                     (r.type == ORB_SLAM3::MultiAgentManager::PendingRequest::Calibration)
-                        ? orbslam2_msgs::msg::AgentRequest::CALIBRATION
-                        : orbslam2_msgs::msg::AgentRequest::KEYFRAME;
+                        ? orbslam3_msgs::msg::AgentRequest::CALIBRATION
+                        : orbslam3_msgs::msg::AgentRequest::KEYFRAME;
                 req.requester_agent = agent_name_;
                 req.target_agent    = r.target_agent;
                 req.keyframe_id     = r.kf_id;
@@ -893,7 +894,7 @@ private:
             // have handed out.
             ORB_SLAM3::MultiAgentManager::OwnerUpdate ou;
             if (slam_->mpMA->GetOwnerUpdate(ou)) {
-                orbslam2_msgs::msg::OwnerUpdate m;
+                orbslam3_msgs::msg::OwnerUpdate m;
                 m.source_agent = agent_name_;
                 m.stamp = now;
                 m.keyframe_id.reserve(ou.kfIds.size());
@@ -927,7 +928,7 @@ private:
 
             // Copy side: our sightings of each owner's landmarks.
             for (const auto& b : slam_->mpMA->GetPendingBackObservations()) {
-                orbslam2_msgs::msg::BackObservations m;
+                orbslam3_msgs::msg::BackObservations m;
                 m.observer_agent = agent_name_;
                 m.owner_agent    = b.owner;
                 m.stamp          = now;
@@ -947,7 +948,7 @@ private:
 
     // Build a received map point and stage it for the background import
     // worker, flushing a batch once enough have accumulated for this agent.
-    void stageImportedPoint(const orbslam2_msgs::msg::MapPoint& msg)
+    void stageImportedPoint(const orbslam3_msgs::msg::MapPoint& msg)
     {
         cv::Mat pos = (cv::Mat_<float>(3,1) <<
             msg.position.x, msg.position.y, msg.position.z);
@@ -980,7 +981,7 @@ private:
     }
 
     // Legacy per-point receive path (mixed fleet / backward compatibility).
-    void importMapPointCallback(const orbslam2_msgs::msg::MapPoint::SharedPtr msg)
+    void importMapPointCallback(const orbslam3_msgs::msg::MapPoint::SharedPtr msg)
     {
         if (msg->agent_name == agent_name_) return;  // ignore our own echo
         receivedCount_++;
@@ -988,7 +989,7 @@ private:
     }
 
     // Batched receive path: one MapPointArray carries many landmarks.
-    void importMapPointArrayCallback(const orbslam2_msgs::msg::MapPointArray::SharedPtr msg)
+    void importMapPointArrayCallback(const orbslam3_msgs::msg::MapPointArray::SharedPtr msg)
     {
         if (msg->agent_name == agent_name_) return;  // ignore our own echo
         for (const auto& pt : msg->points) {
@@ -1000,7 +1001,7 @@ private:
         flushImportedBatch(msg->agent_name);
     }
 
-    void importKeyFrameBoWCallback(const orbslam2_msgs::msg::KeyFrameBoW::SharedPtr msg)
+    void importKeyFrameBoWCallback(const orbslam3_msgs::msg::KeyFrameBoW::SharedPtr msg)
     {
         if (msg->agent_name == agent_name_) return;  // ignore our own echo
         DBoW2::BowVector bow;
@@ -1032,16 +1033,16 @@ private:
 
     // A peer asked us for something. One entry point for every request type;
     // the same code runs on every agent, so the protocol is symmetric.
-    void agentRequestCallback(const orbslam2_msgs::msg::AgentRequest::SharedPtr msg)
+    void agentRequestCallback(const orbslam3_msgs::msg::AgentRequest::SharedPtr msg)
     {
         if (msg->target_agent != agent_name_) return;   // not for us
         if (!slam_ || !slam_->mpMA) return;
 
-        if (msg->request_type == orbslam2_msgs::msg::AgentRequest::CALIBRATION) {
+        if (msg->request_type == orbslam3_msgs::msg::AgentRequest::CALIBRATION) {
             ORB_SLAM3::MultiAgentManager::AgentCalib c;
             if (!slam_->mpMA->GetOwnCalib(c)) return;   // no keyframes yet
 
-            orbslam2_msgs::msg::CameraCalib out;
+            orbslam3_msgs::msg::CameraCalib out;
             out.source_agent   = agent_name_;
             out.model_type     = static_cast<uint8_t>(c.model_type);
             out.intrinsics     = c.intrinsics;
@@ -1059,12 +1060,12 @@ private:
             return;
         }
 
-        if (msg->request_type == orbslam2_msgs::msg::AgentRequest::KEYFRAME) {
+        if (msg->request_type == orbslam3_msgs::msg::AgentRequest::KEYFRAME) {
             ORB_SLAM3::MultiAgentManager::ForeignKeyFrame kf;
             if (!slam_->mpMA->GetOwnKeyFrameFeatures(msg->keyframe_id, kf)) {
                 // Our map cleanup culled it after we advertised it. Say so,
                 // or the requester keeps asking for it forever.
-                orbslam2_msgs::msg::KeyFrameData gone;
+                orbslam3_msgs::msg::KeyFrameData gone;
                 gone.source_agent    = agent_name_;
                 gone.requester_agent = msg->requester_agent;
                 gone.keyframe_id     = msg->keyframe_id;
@@ -1080,7 +1081,7 @@ private:
             }
 
             const size_t N = kf.u.size();
-            orbslam2_msgs::msg::KeyFrameData out;
+            orbslam3_msgs::msg::KeyFrameData out;
             out.source_agent    = agent_name_;
             out.requester_agent = msg->requester_agent;
             out.keyframe_id     = msg->keyframe_id;
@@ -1145,7 +1146,7 @@ private:
     }
 
     // An owner told us what moved among the keyframes and landmarks we copied.
-    void ownerUpdateCallback(const orbslam2_msgs::msg::OwnerUpdate::SharedPtr msg)
+    void ownerUpdateCallback(const orbslam3_msgs::msg::OwnerUpdate::SharedPtr msg)
     {
         if (msg->source_agent == agent_name_) return;    // our own echo
         if (!slam_ || !slam_->mpMA) return;
@@ -1189,7 +1190,7 @@ private:
     }
 
     // A peer saw some of OUR landmarks; its sightings go into our BA.
-    void backObservationsCallback(const orbslam2_msgs::msg::BackObservations::SharedPtr msg)
+    void backObservationsCallback(const orbslam3_msgs::msg::BackObservations::SharedPtr msg)
     {
         if (msg->owner_agent != agent_name_) return;     // not addressed to us
         if (msg->observer_agent == agent_name_) return;
@@ -1215,7 +1216,7 @@ private:
 
     // Calibration is broadcast, not addressed: every agent caches every peer's
     // config, so one agent's request also serves the others.
-    void cameraCalibCallback(const orbslam2_msgs::msg::CameraCalib::SharedPtr msg)
+    void cameraCalibCallback(const orbslam3_msgs::msg::CameraCalib::SharedPtr msg)
     {
         if (msg->source_agent == agent_name_) return;   // our own echo
         if (!slam_ || !slam_->mpMA) return;
@@ -1238,7 +1239,7 @@ private:
 
     // A peer replied with a full keyframe. If it's addressed to us, stage it
     // for tracking against our own map.
-    void keyFrameDataCallback(const orbslam2_msgs::msg::KeyFrameData::SharedPtr msg)
+    void keyFrameDataCallback(const orbslam3_msgs::msg::KeyFrameData::SharedPtr msg)
     {
         if (msg->requester_agent != agent_name_) return;  // not our reply
         if (msg->source_agent == agent_name_) return;     // ignore our own echo
@@ -1800,26 +1801,26 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr merged_map_pub_;
     rclcpp::Publisher<geometry_msgs::msg::TransformStamped>::SharedPtr merge_tf_pub_;
     rclcpp::TimerBase::SharedPtr merged_map_timer_;
-    rclcpp::Publisher<orbslam2_msgs::msg::MapPointArray>::SharedPtr mappoint_pub_;
-    rclcpp::Publisher<orbslam2_msgs::msg::MapPoint>::SharedPtr single_mappoint_pub_;
+    rclcpp::Publisher<orbslam3_msgs::msg::MapPointArray>::SharedPtr mappoint_pub_;
+    rclcpp::Publisher<orbslam3_msgs::msg::MapPoint>::SharedPtr single_mappoint_pub_;
 
     message_filters::Subscriber<sensor_msgs::msg::Image> color_sub_;
     message_filters::Subscriber<sensor_msgs::msg::Image> depth_sub_;
-    rclcpp::Subscription<orbslam2_msgs::msg::MapPoint>::SharedPtr mappoint_sub_;
-    rclcpp::Subscription<orbslam2_msgs::msg::MapPointArray>::SharedPtr mappoint_array_sub_;
-    rclcpp::Publisher<orbslam2_msgs::msg::KeyFrameBoW>::SharedPtr kf_bow_pub_;
-    rclcpp::Subscription<orbslam2_msgs::msg::KeyFrameBoW>::SharedPtr kf_bow_sub_;
+    rclcpp::Subscription<orbslam3_msgs::msg::MapPoint>::SharedPtr mappoint_sub_;
+    rclcpp::Subscription<orbslam3_msgs::msg::MapPointArray>::SharedPtr mappoint_array_sub_;
+    rclcpp::Publisher<orbslam3_msgs::msg::KeyFrameBoW>::SharedPtr kf_bow_pub_;
+    rclcpp::Subscription<orbslam3_msgs::msg::KeyFrameBoW>::SharedPtr kf_bow_sub_;
     // KF-sharing ("new" method): unified request + calibration + full-KF reply
-    rclcpp::Publisher<orbslam2_msgs::msg::AgentRequest>::SharedPtr agent_req_pub_;
-    rclcpp::Subscription<orbslam2_msgs::msg::AgentRequest>::SharedPtr agent_req_sub_;
-    rclcpp::Publisher<orbslam2_msgs::msg::CameraCalib>::SharedPtr calib_pub_;
-    rclcpp::Subscription<orbslam2_msgs::msg::CameraCalib>::SharedPtr calib_sub_;
-    rclcpp::Publisher<orbslam2_msgs::msg::KeyFrameData>::SharedPtr kf_data_pub_;
-    rclcpp::Subscription<orbslam2_msgs::msg::KeyFrameData>::SharedPtr kf_data_sub_;
-    rclcpp::Publisher<orbslam2_msgs::msg::OwnerUpdate>::SharedPtr owner_update_pub_;
-    rclcpp::Subscription<orbslam2_msgs::msg::OwnerUpdate>::SharedPtr owner_update_sub_;
-    rclcpp::Publisher<orbslam2_msgs::msg::BackObservations>::SharedPtr back_obs_pub_;
-    rclcpp::Subscription<orbslam2_msgs::msg::BackObservations>::SharedPtr back_obs_sub_;
+    rclcpp::Publisher<orbslam3_msgs::msg::AgentRequest>::SharedPtr agent_req_pub_;
+    rclcpp::Subscription<orbslam3_msgs::msg::AgentRequest>::SharedPtr agent_req_sub_;
+    rclcpp::Publisher<orbslam3_msgs::msg::CameraCalib>::SharedPtr calib_pub_;
+    rclcpp::Subscription<orbslam3_msgs::msg::CameraCalib>::SharedPtr calib_sub_;
+    rclcpp::Publisher<orbslam3_msgs::msg::KeyFrameData>::SharedPtr kf_data_pub_;
+    rclcpp::Subscription<orbslam3_msgs::msg::KeyFrameData>::SharedPtr kf_data_sub_;
+    rclcpp::Publisher<orbslam3_msgs::msg::OwnerUpdate>::SharedPtr owner_update_pub_;
+    rclcpp::Subscription<orbslam3_msgs::msg::OwnerUpdate>::SharedPtr owner_update_sub_;
+    rclcpp::Publisher<orbslam3_msgs::msg::BackObservations>::SharedPtr back_obs_pub_;
+    rclcpp::Subscription<orbslam3_msgs::msg::BackObservations>::SharedPtr back_obs_sub_;
     std::string ma_method_;
     std::string frame_prefix_;                                   // "" or "<prefix>/"
     std::string map_frame_ = "map", camera_frame_ = "camera_color_optical_frame";

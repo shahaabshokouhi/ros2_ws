@@ -1,28 +1,28 @@
 #!/bin/bash
-# Multi-robot navigation session in Isaac Sim: several JetRacers in the
-# furnished room, each with its own SLAM and Nav2 (its own TF frames
-# <robot>/map_nav, <robot>/odom, ...), and one RViz window per robot to give it
-# goals by hand. Everything is recorded; when the session ends the same report
-# as run_ma_sim_test.sh is written (paths vs ground truth, map merging, maps).
+# SIMULATION, goals by hand. Several cars in Isaac Sim's room, each with its own SLAM and
+# Nav2, and one RViz window per car: give goals with "2D Goal Pose" in that car's window.
+# Everything is recorded; at the end the same report as run_ma_sim_test.sh is written.
+# End the session with Enter (or Ctrl-C).
 #
 #   ./run_ma_sim_nav.sh [--spec FILE] [--method new|hq-mpshare] [--name NAME]
 #                       [--headless] [--no-rviz] [--no-report]
 #
 #   --spec      robots and start poses (default src/jetracer_sim/config/ma_room_nav3.json:
-#               sim_1, sim_2, sim_3 at three places in the room)
-#   --method    multi-robot method for every robot (default new)
-#   --headless  no Isaac window; --no-rviz: no RViz windows
+#               sim_1, sim_2, sim_3 in the room; a spec needs at least two robots)
+#   --method    how robots share maps (default new)
+#   --name      label of the result folder
+#   --headless  no Isaac window
+#   --no-rviz   no RViz windows
+#   --no-report do not write the report
 #
-# Give goals: in robot sim_k's RViz window (title rviz_sim_k.rviz) click
-# "2D Goal Pose", then click and drag on the map. Each window shows only its
-# own robot's map, plan and costmaps; goals are in that robot's own map.
-# End the session with Enter (or Ctrl-C) in this terminal: the robots stop,
-# save their maps, and the report is written to
-# ~/result/ma_nav/<date>_<time>_<name>_<method>/ (a new folder every session).
-# Uses ROS_DOMAIN_ID 31 ($SIM_DOMAIN).
+# Results: ~/result/ma_nav/DATE_TIME_NAME_METHOD/.
 #
-# The whole script is one function, read completely before it runs: editing
-# or pulling this file during a session cannot change the running session.
+# The room only (the lab: run_isaac_explore.sh).
+#
+# Examples:
+#   ./run_ma_sim_nav.sh
+#   ./run_ma_sim_nav.sh --method hq-mpshare --no-rviz
+if [[ "$1" == -h || "$1" == --help ]]; then awk 'NR>1{if(!/^#/)exit; sub(/^# ?/,""); print}' "$0"; exit 0; fi
 main() {
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SPEC="$HERE/src/jetracer_sim/config/ma_room_nav3.json"

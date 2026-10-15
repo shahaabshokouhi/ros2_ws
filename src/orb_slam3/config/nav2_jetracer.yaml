@@ -1,5 +1,5 @@
 # Nav2 for one JetRacer (front-wheel steering), started by
-#   ./run_slam3.sh --nav        (orb_slam3.launch.py nav:=true)
+#   ./run_slam.sh --nav        (orb_slam3.launch.py nav:=true)
 # __AGENT__ and __BT_XML__ are filled in by the launch file. Nodes run in the
 # robot's namespace but use the global /tf.
 #

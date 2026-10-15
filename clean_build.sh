@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# Wipes build/, install/ and log/ of ~/ros2_ws (an OLD workspace path) and rebuilds only the
-# ORB-SLAM2 packages (orbslam2_msgs, orb_slam2) with --symlink-install. It does not build
-# orb_slam3, jetracer, jetracer_sim or ma_explore_ros: use colcon build for those.
-cd ~/ros2_ws
+# ROBOT or PC. Deletes this workspace's build/, install/ and log/ and builds every package
+# again. Needed once after packages were renamed or removed (e.g. orbslam2_msgs ->
+# orbslam3_msgs, 15 Oct 2026); otherwise colcon build (or the run scripts) is enough.
+#
+#   ./clean_build.sh
+#
+# Example:  git pull && ./clean_build.sh
+if [[ "$1" == -h || "$1" == --help ]]; then awk 'NR>1{if(!/^#/)exit; sub(/^# ?/,""); print}' "$0"; exit 0; fi
+set -e
+cd "$(dirname "$0")"
 rm -rf build install log
-colcon build --packages-select orbslam2_msgs --symlink-install
-source install/setup.bash
-colcon build --packages-select orb_slam2 --symlink-install
-source install/setup.bash
+colcon build
+echo "Built. In each new terminal: source install/setup.bash (the run scripts do it themselves)."

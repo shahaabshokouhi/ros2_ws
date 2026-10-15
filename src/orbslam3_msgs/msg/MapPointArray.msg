@@ -4,4 +4,4 @@ std_msgs/Header header
 string agent_name
 
 # Map points
-orbslam2_msgs/MapPoint[] points
+orbslam3_msgs/MapPoint[] points

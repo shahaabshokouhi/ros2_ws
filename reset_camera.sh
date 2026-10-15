@@ -1,8 +1,12 @@
 #!/bin/bash
-# Software replug for a wedged RealSense ("Frames didn't arrive within 5
-# seconds" / "Device or resource busy"). Equivalent to unplug/replug:
-# performs a USB-level port reset on the first Intel RealSense found.
-
+# ROBOT. Software unplug/replug of a stuck RealSense camera (errors "Frames didn't arrive
+# within 5 seconds" or "Device or resource busy"): a USB reset of the first Intel RealSense
+# found. Wait about 4 s afterwards, then start run_slam.sh again. Stop run_slam.sh first.
+#
+#   ./reset_camera.sh
+#
+# Example:  ./reset_camera.sh && sleep 4 && ./run_slam.sh
+if [[ "$1" == -h || "$1" == --help ]]; then awk 'NR>1{if(!/^#/)exit; sub(/^# ?/,""); print}' "$0"; exit 0; fi
 DEV=$(lsusb | grep -i "8086:0b3a\|Intel.*RealSense" | head -1 | awk '{printf "/dev/bus/usb/%s/%s", $2, substr($4,1,3)}')
 if [ -z "$DEV" ] || [ ! -e "$DEV" ]; then
     echo "No RealSense device found on USB."
