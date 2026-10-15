@@ -1,4 +1,4 @@
-# Copied from ma_explore (28e04f5) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (fbdfb24) by scripts/sync_robot_package.sh: edit it there, not here.
 """Actor (decentralized: one robot's own observation) and critic (centralized:
 global state, used in training only).
 
@@ -7,6 +7,11 @@ Actor: a CNN encodes the robot's map planes; tokens for the robot itself
 others are masked out) and each candidate goal (its features + the map
 feature under it) go through a small transformer; each candidate token gives
 one logit (a pointer network over the candidates). Invalid candidates are masked.
+
+With ego observations (env ego_obs, dims['ego']) the map comes as two crops
+centred on the robot, a fine and a coarse one, each with its own CNN: the
+robot's token gets both global features, each candidate the local features of
+both maps where it lies (zero outside a crop). Nothing depends on the map size.
 """
 import torch
 import torch.nn as nn
@@ -61,10 +66,13 @@ class Actor(nn.Module):
     def __init__(self, d=128, layers=2, heads=4, width=64, dims=None):
         super().__init__()
         D = dims or STAGE1_DIMS          # input sizes (env.obs_dims): stage 1 unless given
+        self.ego = bool(D.get('ego'))
         self.enc = MapEncoder(D['planes'], width, d)
-        self.self_tok = nn.Sequential(init_(nn.Linear(d + D['scalars'], d)), nn.GELU(), init_(nn.Linear(d, d)))
+        self.enc_c = MapEncoder(D['planes'], width, d) if self.ego else None       # the coarse crop
+        n_maps = 2 if self.ego else 1
+        self.self_tok = nn.Sequential(init_(nn.Linear(n_maps * d + D['scalars'], d)), nn.GELU(), init_(nn.Linear(d, d)))
         self.mate_tok = nn.Sequential(init_(nn.Linear(D['mate'], d)), nn.GELU(), init_(nn.Linear(d, d)))
-        self.cand_tok = nn.Sequential(init_(nn.Linear(D['cand'] + self.enc.local_dim, d)), nn.GELU(),
+        self.cand_tok = nn.Sequential(init_(nn.Linear(D['cand'] + n_maps * self.enc.local_dim, d)), nn.GELU(),
                                       init_(nn.Linear(d, d)))
         self.type_emb = nn.Parameter(torch.zeros(3, d))
         layer = nn.TransformerEncoderLayer(d, heads, 2 * d, dropout=0.0, activation='gelu',
@@ -73,13 +81,22 @@ class Actor(nn.Module):
         self.norm = nn.LayerNorm(d)
         self.head = init_(nn.Linear(d, 1), 0.01)
 
-    def forward(self, planes, cand, cand_mask, cand_cells, mates, scalars):
+    def forward(self, planes, cand, cand_mask, cand_cells, mates, scalars, planes_c=None, cand_ego=None):
         """All inputs flattened over (env, robot): planes (M, C, H, W) uint8,
         cand (M, K, F), cand_mask (M, K), cand_cells (M, K, 2), mates (M, N-1, Fm),
-        scalars (M, S). Returns masked logits (M, K)."""
+        scalars (M, S); ego: planes is the fine crop, planes_c (M, C, S, S) the coarse
+        one and cand_ego (M, K, 4) the candidates' cells in both. Returns masked logits (M, K)."""
         M, _, H, W = planes.shape
         f2, f3, g = self.enc(planes.float())
-        local = torch.cat([sample_at(f2, cand_cells, H, W), sample_at(f3, cand_cells, H, W)], -1)
+        if self.ego:
+            S = planes_c.shape[-1]
+            c2, c3, gc = self.enc_c(planes_c.float())
+            fc, cc = cand_ego[..., :2], cand_ego[..., 2:]
+            local = torch.cat([sample_at(f2, fc, H, W), sample_at(f3, fc, H, W),
+                               sample_at(c2, cc, S, S), sample_at(c3, cc, S, S)], -1)
+            g = torch.cat([g, gc], -1)
+        else:
+            local = torch.cat([sample_at(f2, cand_cells, H, W), sample_at(f3, cand_cells, H, W)], -1)
         t_self = self.self_tok(torch.cat([g, scalars], -1))[:, None] + self.type_emb[0]
         t_mate = self.mate_tok(mates) + self.type_emb[1]
         t_cand = self.cand_tok(torch.cat([cand, local], -1)) + self.type_emb[2]

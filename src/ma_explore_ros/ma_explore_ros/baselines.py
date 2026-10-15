@@ -1,4 +1,4 @@
-# Copied from ma_explore (28e04f5) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (fbdfb24) by scripts/sync_robot_package.sh: edit it there, not here.
 """Classic decentralized exploration policies, on the same observations as the
 learned policy (each robot uses only its own integrated map and what it knows
 about merged teammates). All commit to a goal until it is reached.
@@ -70,7 +70,7 @@ def slam_rules(obs, wait_backlog=1.5, revisit_after=4.0, revisit_max_m=2.0, beta
     a = coordinated(obs)
     if f.shape[-1] <= 8:                     # stage 1 observation: no SLAM state
         return a
-    far = 2 * obs['planes'].shape[-1]        # H + W: the path feature's scale
+    far = obs.get('far', 2 * obs['planes'].shape[-1])     # the path feature's unit (H + W, or with ego obs fixed)
     backlog, since = 3.0 * sc[..., 4], 5.0 * sc[..., 7]
     has_goal = f[..., 0, 5] > 0
     # 1. SLAM behind: wait (the goal is kept)

@@ -1,4 +1,4 @@
-# Copied from ma_explore (28e04f5) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (fbdfb24) by scripts/sync_robot_package.sh: edit it there, not here.
 """ROS 2 planner for one robot: picks its next exploration goal and sends it to Nav2.
 
     python -m ma_explore.ros_planner --ros-args -p agent:=sim_1 -p agents:="sim_1 sim_2 sim_3" \\
@@ -116,7 +116,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, Float64MultiArray, String
 from tf2_ros import Buffer, TransformListener
 
-from .live import Decider, Grid, Robot, load_policy
+from .live import Decider, Grid, Robot, load_policy, node_index
 from .recovery import BackTrack
 
 TRACKING_OK = 2          # ORB-SLAM3 Tracking::OK
@@ -403,7 +403,7 @@ class Planner(Node):
         cool = (time.monotonic() - self.last_loop_t) >= c.loop_cooldown * c.tick_s
         if old and cool and (explicit or self.reobs_s * c.loop_rate >= 1.0):
             then = min(p[3] for p in old)
-            self.own_edges.append((now_tick // c.node_ticks, then // c.node_ticks))
+            self.own_edges.append((self.node(self.me, now_tick), self.node(self.me, then)))
             self.reobs_s, self.last_loop_t = 0.0, time.monotonic()
 
     def on_wheel(self, m):
@@ -430,6 +430,14 @@ class Planner(Node):
             return (time.monotonic() - self.t_start) / self.mission_s * self.decider.cfg.max_steps
         return self.t_decisions
 
+    def node(self, a, tick):
+        """Robot a's pose-graph node at `tick`, as the policy's training counted them: per node_ticks
+        ticks of time, or (node_by 'move') of a's own motion, from the path it drove."""
+        c = self.decider.cfg
+        if c.node_by == 'move':
+            return int(node_index(self.tposes[a], [tick], c.node_ticks)[0])
+        return int(tick) // c.node_ticks
+
     def tick_now(self):
         """Time since the common start in training ticks (pose-graph nodes, visit times)."""
         if self.t_start is None:
@@ -449,9 +457,8 @@ class Planner(Node):
         if len(e) < want and self.tposes[a]:
             tp = np.array(self.tposes[a])
             xy = apply3(T, tp[:, :2])
-            nt = self.decider.cfg.node_ticks
             d = np.linalg.norm(xy - np.array(self.pose[self.me][:2]), axis=1)
-            nearest = (self.tick_now() // nt, int(tp[int(np.argmin(d)), 3]) // nt)
+            nearest = (self.node(self.me, self.tick_now()), self.node(a, int(tp[int(np.argmin(d)), 3])))
             pairs = ([], [])
             if self.decider.env.views and self.tposes[self.me]:
                 mp = np.array(self.tposes[self.me])
@@ -462,7 +469,7 @@ class Planner(Node):
             while len(e) < want:
                 if len(e) >= 1 and len(pairs[0]):
                     k = int(self.rng.integers(len(pairs[0])))
-                    e.append((int(mp[pairs[0][k], 3]) // nt, int(tp[pairs[1][k], 3]) // nt))
+                    e.append((self.node(self.me, int(mp[pairs[0][k], 3])), self.node(a, int(tp[pairs[1][k], 3]))))
                 else:
                     e.append(nearest)
         return list(e)
@@ -642,7 +649,7 @@ class Planner(Node):
             if not getattr(self, 'stall_saved', False):    # the map it saw, to replay the stall offline
                 self.stall_saved = True
                 np.savez_compressed(os.path.join(self.out, f'{self.me}_stall_{self.t_decisions}.npz'),
-                                    planes=res['obs']['planes'][0, 0].cpu().numpy(), pose=np.array(self.pose[self.me]),
+                                    planes=res['obs'].get('planes_full', res['obs']['planes'])[0, 0].cpu().numpy(), pose=np.array(self.pose[self.me]),
                                     window=np.array([res['window'].x0, res['window'].y0, res['window'].cell]),
                                     blocked=np.array([(b[0], b[1], b[3]) for b in self.blocked]).reshape(-1, 3))
         else:
@@ -836,7 +843,7 @@ class Planner(Node):
     def publish_known(self, res):
         """The map the policy decided on (own + merged teammates' grids, the
         training window) as an OccupancyGrid in my map_nav: for the live view."""
-        planes, win = res['obs']['planes'][0, 0], res['window']
+        planes, win = res['obs'].get('planes_full', res['obs']['planes'])[0, 0], res['window']
         free, occ = planes[0].cpu().numpy().astype(bool), planes[1].cpu().numpy().astype(bool)
         g = np.full(free.shape, -1, np.int8)
         g[free], g[occ] = 0, 100

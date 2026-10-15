@@ -1,4 +1,4 @@
-# Copied from ma_explore (28e04f5) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (fbdfb24) by scripts/sync_robot_package.sh: edit it there, not here.
 """Load a trained actor for deployment, and export the slim file the robots use.
 
 A robot needs only the actor and the environment settings it was trained
@@ -36,7 +36,8 @@ def load_policy_file(path, device='cpu'):
     actor, env_cfg = build_actor(ck['config'], device)
     actor.load_state_dict(ck['actor'])
     actor.eval()
-    keys = ('planes', 'cand', 'cand_mask', 'cand_cells', 'mates', 'scalars')
+    keys = ('planes', 'cand', 'cand_mask', 'cand_cells', 'mates', 'scalars') + \
+        (('planes_c', 'cand_ego') if actor.ego else ())
 
     @torch.no_grad()
     def policy(obs):

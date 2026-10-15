@@ -1,5 +1,6 @@
 """Fixed viewing cameras for the Isaac window: one looking straight down from
-under the ceiling, one in each upper corner looking at the room centre.
+under the ceiling, one in each upper corner looking at the room centre (the
+room, or with --world a larger world: its half sizes and ceiling height).
 Pick them in the viewport's camera menu (top left of the viewport); they are
 not published to ROS and cost nothing until selected."""
 from pxr import Gf, UsdGeom
@@ -26,13 +27,16 @@ def _camera(stage, name, eye, target, up, focal=None, ortho_width=None):
     return f'{ROOT}/{name}'
 
 
-def add_views(stage):
-    """Returns the camera paths, top view first."""
+def add_views(stage, half=(HALF, HALF), height=HEIGHT, centre=(0.0, 0.0)):
+    """Returns the camera paths, top view first. half: the walls' inner half
+    sizes in x and y (m); height: the ceiling (m); centre: the floor's centre."""
     UsdGeom.Xform.Define(stage, ROOT)
-    # Top: orthographic (a plan view; a normal lens under a 2 m ceiling
+    hx, hy = half
+    cx, cy = centre
+    # Top: orthographic (a plan view; a normal lens under the ceiling
     # cannot see the whole room), x to the right and y up, like RViz.
-    paths = [_camera(stage, 'Top', (0, 0, HEIGHT - 0.05), (0, 0, 0), (0, 1, 0), ortho_width=2 * HALF + 0.4)]
-    c = HALF - 0.2
+    paths = [_camera(stage, 'Top', (cx, cy, height - 0.05), (cx, cy, 0), (0, 1, 0), ortho_width=2 * max(hx, hy) + 0.4)]
     for name, sx, sy in [('Corner_NE', 1, 1), ('Corner_NW', -1, 1), ('Corner_SW', -1, -1), ('Corner_SE', 1, -1)]:
-        paths.append(_camera(stage, name, (sx * c, sy * c, HEIGHT - 0.15), (0, 0, 0.3), (0, 0, 1), 10.0))
+        paths.append(_camera(stage, name, (cx + sx * (hx - 0.2), cy + sy * (hy - 0.2), height - 0.15), (cx, cy, 0.3),
+                             (0, 0, 1), 10.0))
     return paths

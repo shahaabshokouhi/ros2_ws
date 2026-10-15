@@ -58,6 +58,18 @@ from jetracer_sim import routes  # noqa: E402
 
 REAR = 0.0698                       # rear axle behind Isaac's base_link (m)
 HALF = 2.975                        # inner wall faces of the room (m)
+# The floor inside the walls (xmin, ymin, xmax, ymax): the room, or a session's world
+# (raw/world/free_grid.json, run_isaac_explore.sh --env big); set by load_obstacles.
+BOUNDS = [-HALF, -HALF, HALF, HALF]
+
+
+def xlim(ax, pad):
+    ax.set_xlim(BOUNDS[0] - pad, BOUNDS[2] + pad)
+    ax.set_ylim(BOUNDS[1] - pad, BOUNDS[3] + pad)
+
+
+def box_aspect3d(ax):
+    ax.set_box_aspect((BOUNDS[2] - BOUNDS[0], BOUNDS[3] - BOUNDS[1], 2.2), zoom=0.95)
 # Categorical slots 1-3 of the report palette (validated for 3 series, all pairs).
 AGENT_COLORS = ['#2a78d6', '#eb6834', '#1baf7a']
 INK, INK2, MUTED, GRID, SURFACE = '#0b0b0b', '#52514e', '#8a8984', '#e4e3df', '#fcfcfb'
@@ -415,7 +427,8 @@ CELL = 0.10      # m, floor-plan coverage cells
 
 
 def in_room(W):
-    return (np.abs(W[:, 0]) < HALF + 0.5) & (np.abs(W[:, 1]) < HALF + 0.5) & (W[:, 2] > -0.3) & (W[:, 2] < 2.3)
+    return ((W[:, 0] > BOUNDS[0] - 0.5) & (W[:, 0] < BOUNDS[2] + 0.5) & (W[:, 1] > BOUNDS[1] - 0.5)
+            & (W[:, 1] < BOUNDS[3] + 0.5) & (W[:, 2] > -0.3) & (W[:, 2] < 2.3))
 
 
 def coverage_points(raw, agents, T_fit):
@@ -497,33 +510,33 @@ def coverage_figures(figdir, agents, color, cov_pts, metrics):
                 if len(W):
                     ax.scatter(W[:, 0], W[:, 1], W[:, 2], s=0.5 if a == h else 0.9, color=color[a],
                                alpha=0.5 if a == h else 0.8, lw=0, depthshade=False)
-            ax.set_xlim(-HALF, HALF)
-            ax.set_ylim(-HALF, HALF)
+            xlim(ax, 0)
             ax.set_zlim(-0.1, 2.1)
             ax.set_zticks([0, 1, 2])
-            ax.set_box_aspect((2 * HALF, 2 * HALF, 2.2), zoom=0.95)
+            box_aspect3d(ax)
             ax.view_init(elev=28, azim=-60)
             ax.tick_params(labelsize=6, pad=0)
             ax.set_title(title, fontsize=9)
         ax2 = fig.add_subplot(gs[2])
         room(ax2)
         own_c = cells(d['own'])
-        img = np.full((int(2 * (HALF + 0.5) / CELL), int(2 * (HALF + 0.5) / CELL), 4), 0.0)
-        off = int((HALF + 0.5) / CELL)
+        x_lo, y_lo = BOUNDS[0] - 0.5, BOUNDS[1] - 0.5
+        img = np.full((int(round((BOUNDS[3] - BOUNDS[1] + 1) / CELL)), int(round((BOUNDS[2] - BOUNDS[0] + 1) / CELL)), 4), 0.0)
+        offx, offy = -int(math.floor(x_lo / CELL)), -int(math.floor(y_lo / CELL))
 
         def paint(cs, rgba):
             for cx, cy in cs:
-                i, j = cy + off, cx + off
+                i, j = cy + offy, cx + offx
                 if 0 <= i < img.shape[0] and 0 <= j < img.shape[1] and img[i, j, 3] == 0:
                     img[i, j] = rgba
         paint(own_c, matplotlib.colors.to_rgba(color[h], 0.9))
         for a in agents:
             if a != h:
                 paint(cells(d['by_origin'][a]) - own_c, matplotlib.colors.to_rgba(color[a], 0.9))
-        ax2.imshow(img, origin='lower', extent=(-HALF - 0.5, HALF + 0.5, -HALF - 0.5, HALF + 0.5),
+        ax2.imshow(img, origin='lower', extent=(-offx * CELL, (img.shape[1] - offx) * CELL,
+                                                -offy * CELL, (img.shape[0] - offy) * CELL),
                    interpolation='nearest', zorder=1)
-        ax2.set_xlim(-HALF - 0.15, HALF + 0.15)
-        ax2.set_ylim(-HALF - 0.15, HALF + 0.15)
+        xlim(ax2, 0.15)
         ax2.set_title(f'{h}: floor plan of the map\n{c["own_area_m2"]:.1f} m² own, {c["integrated_area_m2"]:.1f} m² '
                       f'integrated (+{100 * c["area_gain"]:.0f} %)', fontsize=9)
         handles = [Line2D([], [], ls='', marker='s', ms=7, color=color[h], label=f'{h} (own)')]
@@ -538,7 +551,13 @@ OBSTACLES = []
 
 
 def load_obstacles(raw):
-    """Furniture and prop footprints (raw/room_obstacles.json, else the config's)."""
+    """Furniture and prop footprints and the floor's bounds: a world's (raw/world/, from
+    run_isaac_explore.sh), else the room's (raw/room_obstacles.json, else the config's)."""
+    wdir = os.path.join(raw, 'world')
+    if os.path.exists(os.path.join(wdir, 'free_grid.json')):
+        BOUNDS[:] = json.load(open(os.path.join(wdir, 'free_grid.json')))['world_bounds']
+        OBSTACLES[:] = json.load(open(os.path.join(wdir, 'obstacles.json')))['objects']
+        return
     for path in (os.path.join(raw, 'room_obstacles.json'),
                  os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config', 'room_obstacles.json')):
         if os.path.exists(path):
@@ -547,13 +566,16 @@ def load_obstacles(raw):
 
 
 def room(ax):
-    ax.add_patch(plt.Rectangle((-HALF, -HALF), 2 * HALF, 2 * HALF, fill=False, ec=INK2, lw=1.2))
+    ax.add_patch(plt.Rectangle((BOUNDS[0], BOUNDS[1]), BOUNDS[2] - BOUNDS[0], BOUNDS[3] - BOUNDS[1],
+                               fill=False, ec=INK2, lw=1.2))
     for o in OBSTACLES:
-        ax.add_patch(plt.Rectangle((o['x'][0], o['y'][0]), o['x'][1] - o['x'][0], o['y'][1] - o['y'][0],
-                                   fc='#ecebe7', ec='#d6d5cf', lw=0.5, zorder=0))
+        if o.get('polygon'):
+            ax.add_patch(plt.Polygon(o['polygon'], closed=True, fc='#ecebe7', ec='#d6d5cf', lw=0.5, zorder=0))
+        else:
+            ax.add_patch(plt.Rectangle((o['x'][0], o['y'][0]), o['x'][1] - o['x'][0], o['y'][1] - o['y'][0],
+                                       fc='#ecebe7', ec='#d6d5cf', lw=0.5, zorder=0))
     ax.set_aspect('equal')
-    ax.set_xlim(-HALF - 0.15, HALF + 0.15)
-    ax.set_ylim(-HALF - 0.15, HALF + 0.15)
+    xlim(ax, 0.15)
     ax.set_xlabel('x (m)')
     ax.set_ylabel('y (m)')
 
@@ -583,7 +605,7 @@ def make_figures(run, raw, figdir, spec, agents, color, truths, own, kf_rows, T_
                     arrowprops=dict(arrowstyle='-|>', color=color[a], lw=1.6))
         ax.text(x, y - 0.22, f'{a} start', color=INK2, fontsize=8, ha='center', va='top')
     ax.set_title('Start poses and the true paths driven' if pts is None else 'Test route and the true paths driven')
-    ax.text(0, -HALF + 0.08, 'grey: furniture and props 2-30 cm above the floor', ha='center', fontsize=7, color=MUTED)
+    ax.text((BOUNDS[0] + BOUNDS[2]) / 2, BOUNDS[1] + 0.08, 'grey: furniture and props 2-30 cm above the floor', ha='center', fontsize=7, color=MUTED)
     ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.1), ncol=2)
     figs['overview'] = save(fig, figdir, 'overview.png')
 
@@ -705,7 +727,7 @@ def make_figures(run, raw, figdir, spec, agents, color, truths, own, kf_rows, T_
                 continue
             P = np.array([[float(r['x']), float(r['y']), float(r['z'])] for r in sel])
             W = P @ T[:3, :3].T + T[:3, 3]
-            inside = (np.abs(W[:, 0]) < HALF + 0.5) & (np.abs(W[:, 1]) < HALF + 0.5) & (W[:, 2] > -0.3) & (W[:, 2] < 2.3)
+            inside = in_room(W)
             clipped += int((~inside).sum())
             W = W[inside]
             own_pts = a == h
@@ -726,11 +748,10 @@ def make_figures(run, raw, figdir, spec, agents, color, truths, own, kf_rows, T_
             ax2.scatter(P[:, 0], P[:, 1], s=18, marker=mk, color=color[a], edgecolor=INK, lw=0.5, zorder=3)
             handles.append(Line2D([], [], ls='', marker=mk, ms=6, color=color[a], mec=INK, mew=0.5,
                                   label=f'keyframes from {a} ({len(P)})' + (' (own)' if own_kf else '')))
-        ax3.set_xlim(-HALF, HALF)
-        ax3.set_ylim(-HALF, HALF)
+        xlim(ax3, 0)
         ax3.set_zlim(-0.1, 2.1)
         ax3.set_zticks([0, 1, 2])
-        ax3.set_box_aspect((2 * HALF, 2 * HALF, 2.2), zoom=0.95)
+        box_aspect3d(ax3)
         ax3.view_init(elev=28, azim=-60)
         ax3.set_xlabel('x (m)', labelpad=2)
         ax3.set_ylabel('y (m)', labelpad=2)

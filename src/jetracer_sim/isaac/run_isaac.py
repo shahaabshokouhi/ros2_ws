@@ -4,7 +4,7 @@
 Run with Isaac Sim's Python (../run_isaac_sim.sh does that):
 
     python run_isaac.py [--usd FILE] [--agent sim] [--headless] [--view Top] [--no-realtime] [--plain-room]
-                        [--agents N] [--poses "x,y,yaw;..."] [--gt-log DIR]
+                        [--agents N] [--poses "x,y,yaw;..."] [--gt-log DIR] [--world DIR] [--world-light F]
 
 Opens the JetRacer scene (Ackermann car with a RealSense D455 in a room),
 furnishes the room so visual SLAM can track (room_dressing.py: textured walls
@@ -29,6 +29,13 @@ run_ma_sim_test.sh). --poses places the cars ("x,y,yaw_deg" per car, world
 frame). --gt-log DIR writes DIR/<agent>_gt.csv: every simulation step, the
 wall time and each car's true base_link pose and camera pose (optical frame:
 x right, y down, z forward, as ORB-SLAM3 uses), in Isaac's world frame.
+
+With --world DIR the cars drive in another world instead of the room: DIR
+holds a car-less world (DIR/*.usd, e.g. ~/isaac_worlds/big_env, 22 x 16 m,
+made by its generate_world.py) and its ground truth (free_grid.json,
+obstacles.json). The room, its props, the scene's sun and ground plane are
+deactivated and the world is referenced in their place, in memory only, like
+the room's dressing. --world-light scales the world's lights.
 
 Images carry the SYSTEM clock and the simulation is paced to real time, so
 the SLAM node, Nav2 and RViz run exactly as on the robot (no use_sim_time).
@@ -59,6 +66,12 @@ ap.add_argument('--plain-room', action='store_true',
 ap.add_argument('--light', type=float, default=None,
                 help='brightness of each of the 9 ceiling panels (default 12000); with '
                      '--plain-room: of an even dome light (default 1000, 0: none)')
+ap.add_argument('--world', default='',
+                help='a world folder (its .usd and free_grid.json) to drive in instead of the room')
+ap.add_argument('--world-light', type=float, default=1.0,
+                help='scale of the world\'s lights (--world); big_env as rebuilt on 14 Oct 2026 (panels on a 2 m '
+                     'grid, as bright per square metre as the room) needs none: car images 92-120 of 255 mean '
+                     'brightness, the room 96-124')
 ap.add_argument('--max-steer', type=float, default=0.59,
                 help='steering limit (rad); the real car has 0.6, the joints allow 0.59')
 args = ap.parse_args()
@@ -215,7 +228,45 @@ for car, agent in cars:
     setup_car(car, agent)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-if not args.plain_room:
+world_half = world_centre = world_height = None
+if args.world:
+    import glob  # noqa: E402
+    import json  # noqa: E402
+    from pxr import UsdLux  # noqa: E402
+    wdir = os.path.expanduser(args.world)
+    usds = sorted(glob.glob(os.path.join(wdir, '*.usd')))
+    if len(usds) != 1:
+        sys.exit(f'[jetracer_sim] --world {wdir}: expected one .usd, found {len(usds)}')
+    # The room and everything in it, the sun and the infinite ground plane: switched off, not deleted (nothing
+    # is saved). The cars and the physics scene stay.
+    for path in ('/World/RoomBoundaries', '/World/SceneObjects', '/World/Cardbox_A1', '/World/Pallet_B1',
+                 '/Environment/defaultLight', '/Environment/GroundPlane'):
+        prim = stage.GetPrimAtPath(path)
+        if prim.IsValid():
+            prim.SetActive(False)
+    wprim = stage.DefinePrim('/World/SimWorld', 'Xform')
+    wprim.GetReferences().AddReference(usds[0])
+    for _ in range(5):
+        app.update()
+    for prim in Usd.PrimRange(wprim):
+        if prim.IsA(UsdPhysics.Scene):           # one physics scene: the car scene's
+            prim.SetActive(False)
+    n_light = 0
+    for prim in Usd.PrimRange(wprim):
+        if prim.HasAPI(UsdLux.LightAPI):
+            a = UsdLux.LightAPI(prim).GetIntensityAttr()
+            a.Set(a.Get() * args.world_light)
+            n_light += 1
+    grid = json.load(open(os.path.join(wdir, 'free_grid.json')))
+    x0, y0, x1, y1 = grid['world_bounds']                # xmin, ymin, xmax, ymax of the floor (m)
+    world_half, world_centre = ((x1 - x0) / 2, (y1 - y0) / 2), ((x0 + x1) / 2, (y0 + y1) / 2)
+    ceiling = stage.GetPrimAtPath('/World/SimWorld/Ceiling')   # the viewing cameras hang just under it
+    bb = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ['default', 'render']).ComputeWorldBound(ceiling).ComputeAlignedRange() \
+        if ceiling.IsValid() else None
+    world_height = float(bb.GetMin()[2]) if bb is not None and not bb.IsEmpty() else 2.4
+    print(f'[jetracer_sim] world {usds[0]}: {x1 - x0:.1f} x {y1 - y0:.1f} m, {n_light} lights x {args.world_light:g}; '
+          f'the room is switched off', flush=True)
+elif not args.plain_room:
     import room_dressing  # noqa: E402
     for line in room_dressing.dress(stage, args.light):
         print(f'[jetracer_sim] room: {line}', flush=True)
@@ -230,7 +281,7 @@ elif (1000.0 if args.light is None else args.light) > 0:
 # Viewing cameras for the window (top + 4 upper corners); the scene's own
 # default view looks at the room from outside, i.e. at the ceiling.
 import views  # noqa: E402
-view_paths = views.add_views(stage)
+view_paths = views.add_views(stage, world_half, world_height, world_centre) if args.world else views.add_views(stage)
 if not args.headless:
     from omni.kit.viewport.utility import get_active_viewport  # noqa: E402
     get_active_viewport().camera_path = next(p for p in view_paths if p.endswith('/' + args.view))

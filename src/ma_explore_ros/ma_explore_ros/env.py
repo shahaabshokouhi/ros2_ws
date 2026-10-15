@@ -1,4 +1,4 @@
-# Copied from ma_explore (28e04f5) by scripts/sync_robot_package.sh: edit it there, not here.
+# Copied from ma_explore (fbdfb24) by scripts/sync_robot_package.sh: edit it there, not here.
 """Batched multi-robot exploration environment on the GPU.
 
 B environments x N robots step together. Each robot has its OWN map (what it
@@ -103,6 +103,27 @@ uncertainty it removes; reward + w_unc x uncertainty removed. With
 n_self_revisit, REVISIT-OWN slots offer the robot's own older poses (cell and
 heading), ranked by the uncertainty a loop there would remove (exact for one
 edge: r^2 / (1 + R_nc), from the same eigendecomposition).
+
+Any map size (15 Oct 2026; ego_obs, node_by 'move', unc_reward 'change'):
+  * ego_obs: the actor's map is two crops centred on the robot, a fine one
+    (ego_fine cells of 0.1 m) and a coarse one (ego_coarse cells, each
+    ego_pool x ego_pool fine cells, max-pooled), and positions and distances
+    in the features are in fixed units (pos_scale cells) instead of shares of
+    the map. Nothing the actor sees depends on the size of the map, so a
+    policy trained on maps up to ~14 m runs unchanged in the 22 x 16 m Isaac
+    lab (or any other). Without it: the whole map, positions / map size.
+  * steps_ref_cells: an episode's length follows its map: max_steps decisions
+    for steps_ref_cells free cells, in proportion to the free area (within
+    min_steps .. max_steps_cap); the time input is the share of it gone.
+  * node_by 'move': a pose-graph node per node_ticks ticks of the robot's OWN
+    motion (driving or turning: ORB-SLAM3 makes keyframes when the view
+    changes), not per node_ticks ticks of time for everybody ('time'), so a
+    robot standing still adds no uncertainty.
+  * unc_reward 'change': the team is charged for pose uncertainty added and
+    paid for uncertainty removed, - w_unc x the change of the robots' mean
+    uncertainty (instead of + w_unc x what loops remove, 'removed'). Over a
+    mission it sums to - w_unc x the uncertainty of the map handed over, so
+    once the map is covered, closing loops (REVISIT-OWN) is what pays.
 """
 import math
 from dataclasses import dataclass, field
@@ -123,7 +144,15 @@ STAGE1_DIMS = dict(planes=N_PLANES, cand=N_CAND_FEAT, mate=N_MATE_FEAT, scalars=
 
 
 def obs_dims(cfg):
-    """Observation sizes for the networks (stage 1, or stage 2 with slam_model)."""
+    """Observation sizes for the networks (stage 1, or stage 2 with slam_model); ego: two crops
+    centred on the robot (ego_obs) instead of the whole map."""
+    d = _obs_dims(cfg)
+    if cfg.ego_obs:
+        d['ego'] = True
+    return d
+
+
+def _obs_dims(cfg):
     if not cfg.slam_model:
         return dict(STAGE1_DIMS)
     d = dict(planes=N_PLANES + 1, cand=N_CAND_FEAT + 2, mate=N_MATE_FEAT + 2, scalars=N_SCALARS + 5,
@@ -268,6 +297,17 @@ class EnvConfig:
     merge_n0: int = 1              # measurements in the merge match itself (Isaac: 4)
     merge_floor: float = 0.0       # m: merge error that more links do not remove (Isaac: 0.02)
     w_merge: float = 1.0           # reward per sigma0 of merge error removed
+    # any map size (module docstring, 15 Oct 2026): off = the first design, as trained until then
+    ego_obs: bool = False          # the actor's maps centred on the robot, features in fixed units
+    ego_fine: int = 96             # cells of the fine map (0.1 m: 9.6 m around the robot)
+    ego_coarse: int = 80           # cells of the coarse map ...
+    ego_pool: int = 4              # ... each ego_pool x ego_pool fine cells (0.4 m: 32 m around the robot)
+    pos_scale: float = 96.0        # cells: the unit of positions and distances in the features (ego_obs)
+    steps_ref_cells: int = 0       # free cells of a map that gets max_steps decisions (0: every episode max_steps)
+    min_steps: int = 40            # shortest and ...
+    max_steps_cap: int = 0         # ... longest episode with steps_ref_cells (0: max_steps)
+    node_by: str = 'time'          # pose-graph nodes per node_ticks ticks of 'time' or of the robot's own 'move'ment
+    unc_reward: str = 'removed'    # 'removed': + w_unc x uncertainty loops remove; 'change': - w_unc x its change
 
 
 class ExploreEnv:
@@ -302,6 +342,7 @@ class ExploreEnv:
         self.goal_field = torch.full((B, N, H, W), G.INF, device=d)
         self.heading = torch.zeros(B, N, device=d)
         self.t = torch.zeros(B, dtype=torch.long, device=d)
+        self.max_t = torch.full((B,), c.max_steps, dtype=torch.long, device=d)   # this episode's length (decisions)
         self.ever_success = torch.zeros(B, dtype=torch.bool, device=d)
         self.dist = torch.zeros(B, N, device=d)
         self.t90 = torch.full((B,), -1, dtype=torch.long, device=d)
@@ -340,7 +381,7 @@ class ExploreEnv:
         assert not (c.n_self_revisit and not (c.graph_model and c.pose_revisit)), 'n_self_revisit needs graph_model'
         self.views = c.slam_model and c.link_model == 'views'
         if self.views:
-            assert c.max_steps * c.ticks < 2 ** 15, 'first_view keeps ticks as int16'
+            assert self.longest() * c.ticks < 2 ** 15, 'first_view keeps ticks as int16'
             # tick each robot first had each view (cell, heading bin); -1 = not yet
             self.first_view = torch.full((B, N, H, W, c.link_bins), -1, dtype=torch.int16, device=d)
         self.poses = c.slam_model and (c.pose_revisit or c.graph_model)
@@ -350,6 +391,7 @@ class ExploreEnv:
         self.cand_mate = torch.full((B, N, K), -1, dtype=torch.long, device=d)  # whose pose (revisit poses)
         self.view_yaw = torch.full((B, N), float('nan'), device=d)       # heading to take at a viewpoint goal
         self.escape_cells = 0      # live only (Decider): free cells this near the robot count as passable
+        self.keep_full = False     # live only (Decider): with ego_obs also return the whole-map planes
         if self.poses:
             self.trail_tick = torch.full((B, N, H, W), -1, dtype=torch.int32, device=d)   # last visit
             self.trail_head = torch.zeros(B, N, H, W, device=d)                           # heading then
@@ -357,7 +399,14 @@ class ExploreEnv:
             self.turning = torch.zeros(B, N, dtype=torch.long, device=d)
             self.turn_rate = torch.zeros(B, N, device=d)
         if self.graph:
-            self.M = math.ceil(c.max_steps * c.ticks / c.node_ticks) + 1                # nodes per robot
+            assert c.node_by in ('time', 'move'), c.node_by
+            assert c.unc_reward in ('removed', 'change'), c.unc_reward
+            self.M = math.ceil(self.longest() * c.ticks / c.node_ticks) + 1             # nodes per robot
+            self.T = self.longest() * c.ticks + 1                                       # ticks per episode, at most
+            self.mticks = torch.zeros(B, N, dtype=torch.long, device=d)                 # ticks moving (node_by 'move')
+            # node_by 'move': each robot's node at each tick of the episode, (B, N, T)
+            self.node_at = torch.zeros(B, N, self.T, dtype=torch.int16, device=d) if c.node_by == 'move' else None
+            self.unc_prev = torch.zeros(B, device=d)                                    # mean uncertainty at the last step
             NM = N * self.M
             # each robot's own edges (merge matches, its links), between team node indices j * M + k
             self.gedge = torch.zeros(B, N, NM, NM, device=d)
@@ -368,7 +417,8 @@ class ExploreEnv:
             self.chain = chain
             self.lam2 = torch.zeros(B, N, device=d)
             self.node_gain = torch.zeros(B, N, NM, device=d)
-            self.obs_node = torch.zeros(B, dtype=torch.long, device=d)
+            self.obs_nodes = torch.zeros(B, N, dtype=torch.long, device=d)      # each robot's newest node at observe()
+            self.obs_node = torch.zeros(B, dtype=torch.long, device=d)          # robot 0's (node_by 'time': everyone's)
             self.step_conn = torch.zeros(B, device=d)
             self.step_merge = torch.zeros(B, device=d)
             self.step_unc = torch.zeros(B, device=d)                       # pose uncertainty removed by loops
@@ -379,6 +429,24 @@ class ExploreEnv:
             self.old_view_tick = torch.zeros(B, N, dtype=torch.long, device=d)
 
     # ── episodes ─────────────────────────────────────────────────────────
+    def longest(self):
+        """The longest episode (decisions): sizes the per-episode tables."""
+        c = self.cfg
+        return max(c.max_steps, c.max_steps_cap)
+
+    def node_of(self, b, j, ticks):
+        """Pose-graph node of robot j of env b at tick(s) `ticks` (long tensors, broadcast)."""
+        c = self.cfg
+        if self.node_at is None:
+            return (ticks.long() // c.node_ticks).clamp(0, self.M - 1)
+        return self.node_at[b, j, ticks.long().clamp(0, self.T - 1)].long()
+
+    def cur_node(self):
+        """Each robot's newest node now, (B, N)."""
+        if self.node_at is None:
+            return (self.tick // self.cfg.node_ticks).clamp(max=self.M - 1)[:, None].expand(self.B, self.N)
+        return (self.mticks // self.cfg.node_ticks).clamp(max=self.M - 1)
+
     def reset(self):
         self._reset(torch.ones(self.B, dtype=torch.bool, device=self.dev))
         return self.observe()
@@ -427,6 +495,9 @@ class ExploreEnv:
         self.merged[idx] = torch.eye(N, dtype=torch.bool, device=self.dev)
         self.overlap_since[idx] = -1
         self.t[idx] = 0
+        if c.steps_ref_cells:          # the episode's length follows the map's free area
+            steps = torch.round(c.max_steps * self.n_target[idx] / c.steps_ref_cells).long()
+            self.max_t[idx] = steps.clamp(c.min_steps, self.longest())
         self.ever_success[idx] = False
         self.dist[idx] = 0
         self.t90[idx] = -1
@@ -460,6 +531,10 @@ class ExploreEnv:
             self.step_unc[idx] = 0
             self.unc[idx] = 0
             self.loop_node_gain[idx] = 0
+            self.mticks[idx] = 0
+            self.unc_prev[idx] = 0
+            if self.node_at is not None:
+                self.node_at[idx] = 0
         self._sense(idx)
         self._merge()
         tc, kc = self._coverage()
@@ -552,8 +627,8 @@ class ExploreEnv:
         near = d2.flatten(3).argmin(3)                                           # (B, i, j)
         their_tick = tt.expand(B, N, N, H, W).flatten(3).gather(3, near[..., None]).squeeze(3)
         b, i, j = new.nonzero(as_tuple=True)
-        mine = i * M + (self.tick[b] // self.cfg.node_ticks).clamp(max=M - 1)
-        theirs = j * M + (their_tick[b, i, j].long() // self.cfg.node_ticks).clamp(0, M - 1)
+        mine = i * M + self.cur_node()[b, i]
+        theirs = j * M + self.node_of(b, j, their_tick[b, i, j])
         self.gedge[b, i, mine, theirs] += 1.0
         self.gedge[b, i, theirs, mine] += 1.0
 
@@ -723,7 +798,7 @@ class ExploreEnv:
         success = self.team_cov >= c.success
         first_success = success & ~self.ever_success                        # the bonus once, when it happens
         self.ever_success |= success
-        done = (success & c.end_at_success) | (self.t >= c.max_steps)
+        done = (success & c.end_at_success) | (self.t >= self.max_t)
         reward = (c.w_team * (self.team_cov - old_tc) + c.w_know * (self.know_cov - old_kc)
                   - c.time_cost + c.success_bonus * first_success.float())
         if c.w_end_merged or c.w_end_unc:          # the map the team hands over at the end of the mission
@@ -737,7 +812,13 @@ class ExploreEnv:
             reward = (reward - c.w_drift * drift_term - c.w_lost * self.step_lost / (N * c.ticks)
                       + c.w_link * self.step_links)
         if self.graph:
-            reward = reward + c.w_conn * self.step_conn + c.w_merge * self.step_merge + c.w_unc * self.step_unc
+            reward = reward + c.w_conn * self.step_conn + c.w_merge * self.step_merge
+            if c.unc_reward == 'change':     # - w_unc x the change of the mean pose uncertainty over this step
+                self._graph_eigs()
+                u = self.unc.mean(1)
+                reward = reward - c.w_unc * (u - self.unc_prev)
+            else:
+                reward = reward + c.w_unc * self.step_unc
         reward = reward[:, None].expand(B, N)                                 # the team part: the same for all
         if c.w_own:                  # each robot's own part: cells it saw this step that nobody had seen before
             mine = self.seen_free & self.target[:, None] & ~team_before[:, None]
@@ -840,6 +921,12 @@ class ExploreEnv:
         self.last_link = torch.where(link, tick[..., None].expand(B, N, N), self.last_link)
         self.since_corr = torch.where(loop | any_link, torch.zeros_like(self.since_corr), self.since_corr)
         self.step_drift += (avoidable - (drift_before - self.drift)).sum(1)
+        if self.graph:
+            self.mticks += moving.long()
+            if self.node_at is not None:
+                t_ = self.tick.clamp(max=self.T - 1)
+                self.node_at[torch.arange(B, device=d)[:, None], torch.arange(N, device=d)[None], t_[:, None]] = \
+                    (self.mticks // c.node_ticks).clamp(max=self.M - 1).to(torch.int16)
         self.tick += 1
 
     def _view_match(self):
@@ -894,9 +981,9 @@ class ExploreEnv:
         remove is rewarded. Returns (B, N): the share of the uncertainty removed."""
         c, M, N = self.cfg, self.M, self.N
         b, i = loop.nonzero(as_tuple=True)
-        seen = self.obs_node[b]
-        now = torch.minimum((self.tick[b] // c.node_ticks).clamp(max=M - 1), seen)
-        then = torch.minimum((self.old_view_tick[b, i] // c.node_ticks).clamp(0, M - 1), seen)
+        seen = self.obs_nodes[b, i]
+        now = torch.minimum(self.cur_node()[b, i], seen)
+        then = torch.minimum(self.node_of(b, i, self.old_view_tick[b, i]), seen)
         du = torch.where(then < now, self.loop_node_gain[b, i, then], torch.zeros_like(now, dtype=torch.float))
         self.step_unc.index_add_(0, b, du)
         share = torch.zeros(self.B, N, device=self.dev)
@@ -928,10 +1015,10 @@ class ExploreEnv:
         the newest one then) and the merge error removed."""
         c, M = self.cfg, self.M
         b, i, j = link.nonzero(as_tuple=True)
-        seen = self.obs_node[b]                          # nodes newer than the last observe() are not in the gains
-        now = self.tick[b] if mine_tick is None else mine_tick[b, i, j]
-        now = torch.minimum((now // c.node_ticks).clamp(max=M - 1), seen)
-        then = torch.minimum((their_tick[b, i, j].long() // c.node_ticks).clamp(0, M - 1), seen)
+        seen = self.obs_nodes[b, i]                      # nodes newer than the last observe() are not in the gains
+        now = self.cur_node()[b, i] if mine_tick is None else self.node_of(b, i, mine_tick[b, i, j])
+        now = torch.minimum(now, seen)
+        then = torch.minimum(self.node_of(b, j, their_tick[b, i, j]), self.obs_nodes[b, j])
         mine, theirs = i * M + now, j * M + then
         self.step_conn.index_add_(0, b, self._edge_gain(b, i, mine, theirs))
         self.step_merge.index_add_(0, b, self.merge_gain()[b, i, j])
@@ -948,10 +1035,11 @@ class ExploreEnv:
         1 + w sum_k z_k^2 / (lambda_k - mu) = 0, z = V^T (e_a - e_b) (bisection)."""
         B, N, M, d = self.B, self.N, self.M, self.dev
         NM = N * M
-        cur = (self.tick // self.cfg.node_ticks).clamp(max=M - 1)
-        self.obs_node = cur
-        node_ok = torch.arange(M, device=d)[None] <= cur[:, None]                       # (B, M)
-        allowed = (self.merged[..., None] & node_ok[:, None, None]).reshape(B, N, NM)
+        cur = self.cur_node()                                                           # (B, N)
+        self.obs_nodes = cur.clone()
+        self.obs_node = cur[:, 0].clone()
+        node_ok = torch.arange(M, device=d)[None, None] <= cur[..., None]               # (B, j, M)
+        allowed = (self.merged[..., None] & node_ok[:, None]).reshape(B, N, NM)
         al = allowed.float()
         A = self.chain * al[..., :, None] * al[..., None, :] + self.gedge.clamp(max=3.0)
         L = torch.diag_embed(A.sum(-1) + 50.0 * (1 - al)) - A
@@ -959,7 +1047,7 @@ class ExploreEnv:
         two = allowed.sum(-1).view(-1) >= 2
         lam2 = torch.where(two, ev[:, 1], torch.zeros_like(ev[:, 1])).clamp(min=0)
         self.lam2 = lam2.view(B, N)
-        a = (torch.arange(N, device=d)[None] * M + cur[:, None]).view(-1)            # my newest node
+        a = (torch.arange(N, device=d)[None] * M + cur).view(-1)                     # my newest node
         Z = V[torch.arange(B * N, device=d), a][:, None, :] - V                       # (BN, b, k): z for edge a-b
         ok = two & (lam2 > 1e-7) & (ev[:, 2] - ev[:, 1] > 1e-7)
         gain = self._secular_gain(ev[:, None, :], Z ** 2, lam2[:, None])
@@ -974,7 +1062,8 @@ class ExploreEnv:
         inv = torch.where((ev > 1e-6) & (ev < 25.0), 1.0 / ev.clamp(min=1e-6), torch.zeros_like(ev))   # L+ spectrum
         anchor = (torch.arange(N, device=d)[None] * M).expand(B, N).reshape(-1)
         za = V[r_, anchor] - V[r_, a]                                                   # (BN, K)
-        frac = ((self.tick % self.cfg.node_ticks).float() / self.cfg.node_ticks)[:, None].expand(B, N)
+        moved = self.mticks if self.node_at is not None else self.tick[:, None].expand(B, N)
+        frac = (moved % self.cfg.node_ticks).float() / self.cfg.node_ticks
         self.unc = (za ** 2 * inv).sum(-1).view(B, N) + frac
         if self.cfg.n_self_revisit:
             own = (torch.arange(NM, device=d) // M)[None] == torch.arange(N, device=d).repeat(B)[:, None]   # (BN, NM)
@@ -1018,7 +1107,8 @@ class ExploreEnv:
         n, HW = c.n_self_revisit, H * W
         tt = self.trail_tick.view(B, N, HW).long()                                  # my own last visit per cell
         old = (tt >= 0) & (self.tick[:, None, None] - tt >= c.loop_age)
-        node = (tt // c.node_ticks).clamp(0, M - 1)
+        node = ((tt // c.node_ticks).clamp(0, M - 1) if self.node_at is None
+                else self.node_at.gather(2, tt.clamp(0, self.T - 1)).long())
         gain = self.loop_node_gain.gather(2, node)                                 # (B, N, HW)
         ok = (old & (stand_known & (Dr < G.INF)).view(B, N, HW))
         score = torch.where(ok, (0.02 + gain) / (1 + Dr.view(B, N, HW) / 20.0), torch.zeros((), device=d))
@@ -1045,7 +1135,9 @@ class ExploreEnv:
         conn = mg = None
         if self.graph:
             M = self.M
-            node = (tt.long() // c.node_ticks).clamp(0, M - 1) + (torch.arange(N, device=d) * M).view(1, 1, N, 1)
+            node = ((tt.long() // c.node_ticks).clamp(0, M - 1) if self.node_at is None      # (B, 1, j, HW)
+                    else self.node_at.gather(2, tt[:, 0].long().clamp(0, self.T - 1)).long()[:, None])
+            node = node + (torch.arange(N, device=d) * M).view(1, 1, N, 1)
             conn = self.node_gain[:, :, None, :].expand(B, N, N, N * M).gather(3, node.expand(B, N, N, HW))
             mg = self.merge_gain()                                                    # (B, i, j)
             val = conn / c.conn_cap + mg[..., None]
@@ -1191,12 +1283,16 @@ class ExploreEnv:
             best = torch.where(better, v, best)
             prev = torch.where(better[..., None], torch.tensor([float(dy), float(dx)], device=d), prev)
         self.cand_arrive = torch.atan2(-prev[..., 0], -prev[..., 1])                 # from the previous cell to the goal
-        # candidate features
+        # candidate features: positions and distances in shares of the map, or with ego_obs in fixed
+        # units (pos_scale cells), so they mean the same on a map of any size
+        Hs, Ws = (c.pos_scale, c.pos_scale) if c.ego_obs else (H, W)
+        far = float(Hs + Ws)
+        none = 3 * far if c.ego_obs else far              # "no teammate": beyond any real distance with ego_obs
         rel = (self.cand - self.pos[:, :, None]).float()
         cy, cx = self.cand[..., 0], self.cand[..., 1]
         bi = torch.arange(B, device=d)[:, None, None].expand(B, N, K)
         ni = torch.arange(N, device=d)[None, :, None].expand(B, N, K)
-        path = Dr[bi, ni, cy, cx].clamp(max=2 * (H + W))
+        path = Dr[bi, ni, cy, cx].clamp(max=2 * far if not c.ego_obs else 3 * far)
         gain = ig[bi, ni, cy, cx] / self.ig_norm
         gpos = self.goal.float()
         ppos = self.pos.float()
@@ -1204,12 +1300,11 @@ class ExploreEnv:
                             gpos[:, None].expand(B, N, N, 2).reshape(B * N, N, 2)).view(B, N, K, N)
         dpos = torch.cdist(self.cand.float().view(B * N, K, 2),
                            ppos[:, None].expand(B, N, N, 2).reshape(B * N, N, 2)).view(B, N, K, N)
-        far = float(H + W)
-        dgoal = torch.where(mate[:, :, None] & self.has_goal[:, None, None], dgoal, torch.full((), far, device=d)).amin(-1)
-        dpos = torch.where(mate[:, :, None], dpos, torch.full((), far, device=d)).amin(-1)
+        dgoal = torch.where(mate[:, :, None] & self.has_goal[:, None, None], dgoal, torch.full((), none, device=d)).amin(-1)
+        dpos = torch.where(mate[:, :, None], dpos, torch.full((), none, device=d)).amin(-1)
         is_keep = torch.zeros(B, N, K, device=d)
         is_keep[..., 0] = self.has_goal.float()
-        feats = [rel[..., 0] / H, rel[..., 1] / W, path / far, rel.norm(dim=-1) / far, gain, is_keep, dgoal / far, dpos / far]
+        feats = [rel[..., 0] / Hs, rel[..., 1] / Ws, path / far, rel.norm(dim=-1) / far, gain, is_keep, dgoal / far, dpos / far]
         if c.slam_model:
             is_wait = torch.zeros(B, N, K, device=d)
             is_rev = torch.zeros(B, N, K, device=d)
@@ -1242,8 +1337,8 @@ class ExploreEnv:
         rel_p = (ppos[:, None] - ppos[:, :, None])                                 # (B, N, N, 2): j relative to i
         rel_g = (gpos[:, None] - ppos[:, :, None])
         mf = mate.float()[..., None]
-        mparts = [mate.float()[..., None], rel_p[..., :1] / H * mf, rel_p[..., 1:] / W * mf,
-                  rel_g[..., :1] / H * mf, rel_g[..., 1:] / W * mf,
+        mparts = [mate.float()[..., None], rel_p[..., :1] / Hs * mf, rel_p[..., 1:] / Ws * mf,
+                  rel_g[..., :1] / Hs * mf, rel_g[..., 1:] / Ws * mf,
                   (rel_p.norm(dim=-1, keepdim=True) / far) * mf + (1 - mf)]
         if c.slam_model:     # graph links with that teammate; its distance since a map correction
             mparts += [(self.links / c.link_cap).clamp(max=1)[..., None] * mf,
@@ -1266,8 +1361,8 @@ class ExploreEnv:
         if c.slam_model:
             plist.append(torch.einsum('bnm,bmk->bnk', mate.float(), self.trail.flatten(2).float()).view(B, N, H, W) > 0)
         planes = torch.stack(plist, 2)
-        slist = [(self.t.float() / c.max_steps)[:, None].expand(B, N),
-                 ((free | occ).flatten(2).sum(2).float() / (H * W)),
+        slist = [(self.t.float() / self.max_t)[:, None].expand(B, N),
+                 ((free | occ).flatten(2).sum(2).float() / (Hs * Ws)).clamp(max=8.0),
                  mate.float().sum(2) / max(1, N - 1), self.has_goal.float()]
         if c.slam_model:     # what the robot's SLAM node publishes about itself
             slist += [(self.backlog / 3.0).clamp(max=3), (self.lost > 0).float(), self.lost.float() / c.lost_ticks,
@@ -1282,7 +1377,7 @@ class ExploreEnv:
         # adds each robot's own position plane (planes[:, :, 4]) itself.
         state = torch.stack([self.occ, self.seen_free.any(1), self.seen_occ.any(1),
                              pos_plane.any(1), goal_plane.any(1)], 1)
-        sslist = [self.t.float() / c.max_steps, self.team_cov, self.merged.float().mean((1, 2))]
+        sslist = [self.t.float() / self.max_t, self.team_cov, self.merged.float().mean((1, 2))]
         if c.slam_model:     # the truth: drift is hidden from the robots
             sslist += [(self.drift.mean(1) / 0.5).clamp(max=4), (self.backlog.amax(1) / 3.0).clamp(max=3),
                        (self.lost > 0).float().mean(1), (self.links.clamp(max=c.link_cap).sum((1, 2))
@@ -1294,6 +1389,54 @@ class ExploreEnv:
         if n_own:
             sslist.append((self.unc.mean(1) / 10.0).clamp(max=3))
         state_scalars = torch.stack(sslist, -1)
-        return {'planes': planes.to(torch.uint8), 'cand': cand_feat, 'cand_mask': self.cand_mask,
-                'mates': mates, 'scalars': scalars, 'cand_cells': self.cand,
-                'state': state.to(torch.uint8), 'state_scalars': state_scalars}
+        if self.graph:
+            self.unc_prev = self.unc.mean(1)          # the uncertainty this step starts from (unc_reward 'change')
+        out = {'planes': planes.to(torch.uint8), 'cand': cand_feat, 'cand_mask': self.cand_mask,
+               'mates': mates, 'scalars': scalars, 'cand_cells': self.cand,
+               'state': state.to(torch.uint8), 'state_scalars': state_scalars}
+        if c.ego_obs:
+            full = out['planes']
+            out.update(self._ego(full))
+            if self.keep_full:          # live (Decider): the whole map too, for checks and the views
+                out['planes_full'] = full
+        out['far'] = float(Hs + Ws)     # the unit of the distance features (rule planners)
+        return out
+
+    def _ego(self, planes):
+        """The actor's maps centred on each robot (ego_obs): planes (B, N, C, F, F), the fine crop of
+        0.1 m cells; planes_c (B, N, C, S, S), the coarse crop of ego_pool x ego_pool cells
+        (max-pooled: a coarse cell is free / occupied / a frontier ... if any of its cells is), its
+        blocks anchored on the robot (its cell in the middle of the middle block), so it does not
+        depend on where the grid starts (training grid or live window); cand_ego (B, N, K, 4): each
+        candidate's (row, col) in the fine and in the coarse crop (cells, fractional; outside a crop
+        is fine, its map features are then zero); pos (B, N, 2): each robot's cell, for the critic's
+        own-position plane. Off the map counts as unknown."""
+        c, B, N, H, W = self.cfg, self.B, self.N, self.H, self.W
+        C = planes.shape[2]
+        Fs, Sc, k = c.ego_fine, c.ego_coarse, c.ego_pool
+        P = planes.view(B * N, C, H, W)
+        pos = self.pos.view(B * N, 2)
+        fine = self._crop(P, pos, Fs)
+        top = pos - (Sc // 2) * k - k // 2                       # fine cell at the corner of coarse block (0, 0)
+        coarse = None
+        for a in range(k):                                       # max over the k x k cells of every block
+            for b in range(k):
+                part = self._crop(P, top + torch.tensor([a, b], device=self.dev), Sc, step=k, centred=False)
+                coarse = part if coarse is None else torch.maximum(coarse, part)
+        rel = (self.cand - self.pos[:, :, None]).float()                               # (B, N, K, 2)
+        ego = torch.cat([rel + Fs // 2, (rel + (Sc // 2) * k + k // 2 + 0.5) / k - 0.5], -1)
+        return {'planes': fine.view(B, N, C, Fs, Fs), 'planes_c': coarse.view(B, N, C, Sc, Sc), 'cand_ego': ego,
+                'pos': self.pos.clone()}
+
+    @staticmethod
+    def _crop(x, at, S, step=1, centred=True):
+        """(R, C, H, W) -> (R, C, S, S): every step-th cell from `at` (R, 2), or with cell S // 2
+        at `at` (centred); zeros off the map."""
+        R, C, H, W = x.shape
+        o = torch.arange(S, device=x.device) * step - (S // 2 if centred else 0)
+        ys, xs = at[:, 0:1] + o, at[:, 1:2] + o                                         # (R, S)
+        okr, okc = (ys >= 0) & (ys < H), (xs >= 0) & (xs < W)
+        r = torch.arange(R, device=x.device)[:, None, None]
+        out = x[r, :, ys.clamp(0, H - 1)[:, :, None], xs.clamp(0, W - 1)[:, None, :]]   # (R, S, S, C)
+        out = out * (okr[:, :, None] & okc[:, None, :])[..., None].to(out.dtype)
+        return out.permute(0, 3, 1, 2).contiguous()

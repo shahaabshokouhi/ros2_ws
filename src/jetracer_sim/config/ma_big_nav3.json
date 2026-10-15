@@ -1,0 +1,33 @@
+{
+  "name": "big_nav3",
+  "env": "big",
+  "description": "Three cars in the 22 x 16 m exploration lab (~/isaac_worlds/big_env: four rooms, a cross corridor and outer galleries; loops of 20, 24.5 and 49 m), each with its own SLAM and Nav2. The 'spread' start set: 16-18 m apart along paths, walls between them, so the robots meet late. The test environment from 15 Oct 2026.",
+  "world": "~/isaac_worlds/big_env",
+  "agents": [
+    "sim_1",
+    "sim_2",
+    "sim_3"
+  ],
+  "starts": [
+    [
+      -8.5,
+      -3.0,
+      90.0
+    ],
+    [
+      8.5,
+      -3.0,
+      90.0
+    ],
+    [
+      0.0,
+      6.9,
+      180.0
+    ]
+  ],
+  "time_limit": 1200,
+  "planner_params": {
+    "alc_scale": 1.0
+  },
+  "planner_params_note": "classic_planner parameters for this world: active loop closing keeps the paper's distances (2.5 / 6 / 20 m; the room scales them by 0.3): the lab has loops of 20-49 m"
+}
