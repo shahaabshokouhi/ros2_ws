@@ -12,7 +12,8 @@
 #                          [--no-report] [--planner-param NAME:=VALUE ...]
 #
 #   --planner     rl (default: the trained policy in --checkpoint); rules: coordinated, nearest,
-#                 utility, random; published methods: mmpf, mtsp, burgard, alc
+#                 utility, random; published methods: mmpf, mtsp, burgard, alc; multi-robot active
+#                 SLAM: acslam (Ahmed et al. 2024), emaslam (Ahmed et al. 2025)
 #   --checkpoint  the policy (default: best.pt of the newest run in ~/result/ma_explore/runs)
 #   --env         big (default): the 22 x 16 m lab (~/isaac_worlds/big_env, spec
 #                 config/ma_big_nav3.json, 1200 s); room: the 6 x 6 m room (ma_room_nav3.json, 300 s)
@@ -63,7 +64,7 @@ while [[ $# -gt 0 ]]; do
 done
 MODULE=ma_explore.ros_planner; MPARAMS=()
 case "$PLANNER" in      # published methods: the shared robot stack's own policy slot holds a rule it does not use
-    mmpf|mtsp|burgard|alc) MODULE=ma_explore.classic_planner; MPARAMS=(-p method:="$PLANNER" -p policy:=coordinated) ;;
+    mmpf|mtsp|burgard|alc|acslam|emaslam) MODULE=ma_explore.classic_planner; MPARAMS=(-p method:="$PLANNER" -p policy:=coordinated) ;;
 esac
 SPEC_PARAMS=()          # the spec's planner_params (e.g. the lab: alc_scale 1.0), set below once the spec is known
 if [ "$PLANNER" = rl ]; then

@@ -1,4 +1,4 @@
-# Copied from ma_explore (7ccc3f9) by ma_explore.robot_package: edit it there, not here.
+# Copied from ma_explore (7ccc3f9+changes) by ma_explore.robot_package: edit it there, not here.
 """ROS 2 planner for one robot: picks its next exploration goal and sends it to Nav2.
 
     python -m ma_explore.ros_planner --ros-args -p agent:=sim_1 -p agents:="sim_1 sim_2 sim_3" \\
@@ -71,7 +71,17 @@ spot free again, and the car's Nav2 recoveries never clear the costmaps. Then:
 2. stuck again within `unstick_reset` s: back up `unstick_back` m along the path
    just driven (known free; wheel odometry), clear again, decide;
 3. stuck again: log that it needs help; start over after `unstick_reset` s.
-Events 'stuck_clear', 'stuck_backup', 'stuck_help' go to <agent>_slam_events.csv. /ma_explore/<agent>/enable
+A wedged car -- its outline, on its own grid (/<agent>/map), closer than
+`escape_target` m to an obstacle, so Nav2 finds its start "in lethal" and its
+back-up will not move -- escapes instead, from step 1 on: it drives the shortest
+short arc (forward or in reverse, recovery.WedgeEscape) that brings the outline
+out to `escape_target` m without coming closer to an obstacle or entering
+unknown ground, in up to `escape_segments` arcs at `escape_speed`, directly on
+cmd_vel. It stops a segment when the wheels do not move, when tracking is lost,
+or, driving forward, when the depth scan (/<agent>/orb_slam3/scan) shows an
+obstacle within `escape_scan_stop` m ahead; then the costmaps are cleared and it
+decides again. Events 'stuck_clear', 'stuck_escape', 'stuck_escaped',
+'stuck_backup', 'stuck_help' go to <agent>_slam_events.csv. /ma_explore/<agent>/enable
 (std_msgs/Bool) switches exploring off (the goal is cancelled) and on.
 -p policy:= takes 'rl:<file>', a .pt file (checkpoint or robot_policy.pt) or a baseline name.
 
@@ -116,15 +126,16 @@ from geometry_msgs.msg import PointStamped, TransformStamped, Twist
 from nav2_msgs.action import NavigateToPose
 from nav2_msgs.srv import ClearEntireCostmap
 from nav_msgs.msg import OccupancyGrid, Odometry
+from sensor_msgs.msg import LaserScan
 from rclpy.action import ActionClient
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from std_msgs.msg import Bool, Float64MultiArray, String
 from tf2_ros import Buffer, TransformListener
 
 from .live import Decider, Grid, Robot, load_policy, node_index
-from .recovery import BackTrack
+from .recovery import BackTrack, WedgeEscape
 
 TRACKING_OK = 2          # ORB-SLAM3 Tracking::OK
 
@@ -202,8 +213,16 @@ class Planner(Node):
         self.unstick_back = p('unstick_back', 0.3)           # m backed up in step 2
         self.unstick_reset = p('unstick_reset', 120.0)       # s: a later stuck spell starts again at step 1
         self.unstick_test_at = p('unstick_test_at', -1.0)    # testing: act as if stuck this many s after the start
+        # wedged car (module docstring): drive out on the car's own grid; Nav2 cannot plan from inside the inflation
+        self.escape_on = p('escape', True)
+        self.escape_target = p('escape_target', 0.10)        # m: outline clearance at which Nav2 can plan again
+        self.escape_speed = p('escape_speed', 0.08)          # m/s
+        self.escape_segments = int(p('escape_segments', 4))  # arcs per escape
+        self.escape_max_len = p('escape_max_len', 0.5)       # m per arc
+        self.escape_scan_stop = p('escape_scan_stop', 0.12)  # m: forward segment stops at an obstacle this close ahead
+        self.scan_front = (math.inf, -1e9)                   # (nearest range within 40 deg ahead, wall time)
         self.aborts = deque()                                 # (time, xy) of recent aborted goals
-        self.unstick = {'step': 0, 't': -1e9, 'bt': None}
+        self.unstick = {'step': 0, 't': -1e9, 'bt': None, 'esc': None}
         # close enough: a car within near_dist m of its goal for near_s s counts as there, even if Nav2 is
         # still manoeuvring to match the goal heading (a car cannot turn on the spot; Isaac, 13 October)
         self.near_dist = p('near_dist', 0.15)
@@ -293,6 +312,8 @@ class Planner(Node):
         self.known_pub = self.create_publisher(OccupancyGrid, f'/ma_explore/{self.me}/known_map', latched)
         self.create_subscription(Bool, f'/ma_explore/{self.me}/enable', self.on_enable, latched)
         self.create_subscription(Odometry, f'/{self.me}/odom', self.on_wheel, 20)     # the base driver's wheel odometry
+        self.create_subscription(LaserScan, f'/{self.me}/orb_slam3/scan', self.on_scan,      # the depth scan (escape;
+                                 qos_profile_sensor_data)                               # published best effort)
         self.cmd_pub = self.create_publisher(Twist, f'/{self.me}/cmd_vel', 10)      # direct, as the keyboard teleop
         self.tf = Buffer()
         self.tfl = TransformListener(self.tf, self)
@@ -424,6 +445,12 @@ class Planner(Node):
     def on_wheel(self, m):
         q = m.pose.pose.orientation
         self.wheel_hist.append((time.monotonic(), m.pose.pose.position.x, m.pose.pose.position.y, yaw_of(q)))
+
+    def on_scan(self, m):
+        a = m.angle_min + m.angle_increment * np.arange(len(m.ranges))
+        r = np.asarray(m.ranges, float)
+        front = (np.abs(a) <= math.radians(40)) & np.isfinite(r) & (r >= m.range_min)
+        self.scan_front = (float(r[front].min()) if front.any() else math.inf, time.monotonic())
 
     def on_links(self, m):
         """Links per teammate beyond the merge match: ORB-SLAM3 counts the merge's
@@ -576,7 +603,7 @@ class Planner(Node):
             self.publish_goal()
         if not self.enabled:
             return
-        if self.unstick['bt'] is not None:          # backing up out of a stuck spot (unstick_tick drives)
+        if self.unstick['bt'] is not None or self.unstick['esc'] is not None:   # unstick_tick drives
             return
         if (self.unstick_test_at > 0 and self.t_start is not None and now - self.t_start > self.unstick_test_at):
             self.unstick_test_at = -1.0 if self.unstick['step'] >= 1 else self.unstick_test_at + 15.0
@@ -637,7 +664,7 @@ class Planner(Node):
                 self.goal_seq += 1                          # the cancel is not Nav2's abort
                 self.goal_handle.cancel_goal_async()
             self.fail(g, f'made no progress for {self.progress_s:.0f} s ({left:.2f} m left)')
-            return 'no progress' if self.unstick['bt'] is None else None    # not while backing out of a stuck spot
+            return 'no progress' if (self.unstick['bt'] is None and self.unstick['esc'] is None) else None
         if self.merge_event and frontier:
             return 'merge'
         if now - self.goal_t0 >= self.trip_max_s:
@@ -1032,7 +1059,10 @@ class Planner(Node):
         what = 'test' if test else f'{n} goals aborted in {now - first:.0f} s without moving'
         # the goals that failed while stuck failed because of the walls, not because of where they are
         self.blocked = [b for b in self.blocked if not (b[4] == 'failed' and b[2] - self.block_time >= first - 1.0)]
-        if u['step'] == 1:
+        esc = self.wedge() if (self.escape_on and u['step'] <= 2) else None
+        if esc is not None and self.start_escape(esc, f"{'stuck' if u['step'] == 1 else 'stuck again'} ({what})"):
+            self.clear_costmaps()
+        elif u['step'] == 1:
             self.clear_costmaps()
             self.slam_event('stuck_clear', 0.0)
             self.get_logger().warn(f'{self.me}: stuck ({what}): cleared the costmaps')
@@ -1053,6 +1083,101 @@ class Planner(Node):
             self.slam_event('stuck_help', 0.0)
             self.get_logger().error(f'{self.me}: still stuck ({what}) after clearing the costmaps and backing up: '
                                     f'needs help (trying again after {self.unstick_reset:.0f} s)')
+
+    # ── wedged car: drive out on the car's own grid (module docstring) ────
+    def wedge(self):
+        """A WedgeEscape for the car where it is now if it is wedged (outline closer than escape_target to an
+        obstacle on its own grid), else None."""
+        g = self.grid.get(self.me)
+        if g is None or self.me not in self.pose or self.lost_since is not None:
+            return None
+        hist = list(self.slam_hist)[-150:]                 # the last few metres driven: passable ground
+        esc = WedgeEscape(g.data, g.resolution, g.origin_x, g.origin_y, self.pose[self.me],
+                          driven=[(h[1], h[2], h[3]) for h in hist], target=self.escape_target,
+                          max_len=self.escape_max_len)
+        return esc if esc.wedged() else None
+
+    def start_escape(self, esc, why):
+        """Drive the first escape arc; False if there is none (the usual step runs instead)."""
+        plan = esc.plan()
+        c0 = esc.clearance(esc.pose)
+        if plan is None:
+            self.get_logger().warn(f'{self.me}: {why}: wedged ({100 * c0:.0f} cm from an obstacle on its grid), '
+                                   'but no short arc leads out over known ground')
+            return False
+        u = self.unstick
+        n = 1 if u['esc'] is None else u['esc']['segments'] + 1
+        self.begin_segment(plan, n)
+        if n == 1:
+            self.slam_event('stuck_escape', 0.0)
+        sign, k, length, _, c1 = plan
+        self.get_logger().warn(f'{self.me}: {why}: wedged, {100 * c0:.0f} cm from an obstacle on its grid; '
+                               f'escape arc {n}: {"forward" if sign > 0 else "reverse"} {length:.2f} m at '
+                               f'radius {"inf" if k == 0 else f"{1 / k:+.2f}"} m, to {100 * c1:.0f} cm')
+        return True
+
+    def begin_segment(self, plan, n):
+        now = time.monotonic()
+        w = self.wheel_hist[-1] if self.wheel_hist else None
+        wheel = w if (w is not None and now - w[0] < 0.5) else None
+        self.unstick['esc'] = {'plan': plan, 'segments': n, 't_drive': now, 'driven': 0.0,
+                               'last': wheel[1:3] if wheel else None, 'check': (now, wheel[1:3] if wheel else None)}
+
+    def escape_tick(self, now):
+        u, e = self.unstick, self.unstick['esc']
+        sign, k, length, _, _ = e['plan']
+        w = self.wheel_hist[-1] if self.wheel_hist else None
+        wheel = w if (w is not None and now - w[0] < 0.5) else None
+        if wheel is not None and e['last'] is not None:
+            e['driven'] += math.dist(e['last'], wheel[1:3])
+        e['last'] = wheel[1:3] if wheel else e['last']
+        stop = None
+        if self.lost_since is not None:
+            stop = 'tracking lost'
+        elif wheel is not None and e['driven'] >= length:
+            stop = 'done'
+        elif wheel is None and now - e['t_drive'] >= length / max(self.escape_speed, 1e-3):
+            stop = 'done (timed: no wheel odometry)'
+        elif now - e['t_drive'] > 3.0 * length / max(self.escape_speed, 1e-3) + 2.0:
+            stop = 'time up'
+        elif sign > 0 and now - self.scan_front[1] < 0.5 and self.scan_front[0] < self.escape_scan_stop:
+            stop = f'obstacle {100 * self.scan_front[0]:.0f} cm ahead'
+        else:
+            t0, xy0 = e['check']
+            if now - t0 > 3.0:
+                if wheel is not None and xy0 is not None and math.dist(xy0, wheel[1:3]) < 0.02:
+                    stop = 'blocked (the wheels do not move)'
+                e['check'] = (now, wheel[1:3] if wheel else None)
+        if stop is None:
+            cmd = Twist()
+            cmd.linear.x = float(sign * self.escape_speed)
+            cmd.angular.z = float(sign * self.escape_speed * k)
+            self.cmd_pub.publish(cmd)
+            return
+        self.stop_car()
+        self.get_logger().info(f"{self.me}: escape arc {e['segments']}: {stop} after {e['driven']:.2f} m")
+        if stop == 'tracking lost':                        # the tracking recovery takes over
+            u['esc'] = None
+            return
+        nxt = self.wedge()
+        if nxt is None:
+            u['esc'] = None
+            self.clear_costmaps()
+            self.slam_event('stuck_escaped', 0.0)
+            self.get_logger().info(f'{self.me}: out of the wedge; clearing the costmaps and deciding again')
+            return
+        plan = nxt.plan() if e['segments'] < self.escape_segments else None
+        if plan is None:
+            u['esc'] = None
+            self.clear_costmaps()
+            self.get_logger().warn(f"{self.me}: still wedged after {e['segments']} escape arcs "
+                                   f'({100 * nxt.clearance(nxt.pose):.0f} cm); clearing the costmaps and deciding again')
+            return
+        self.begin_segment(plan, e['segments'] + 1)
+        sign, k, length, c0, c1 = plan
+        self.get_logger().info(f"{self.me}: escape arc {e['segments']}: {'forward' if sign > 0 else 'reverse'} "
+                               f"{length:.2f} m at radius {'inf' if k == 0 else f'{1 / k:+.2f}'} m, "
+                               f'{100 * c0:.0f} -> {100 * c1:.0f} cm')
 
     def path_back(self, back_m):
         """A BackTrack over the last back_m metres driven, from where the car is now, or None."""
@@ -1079,6 +1204,9 @@ class Planner(Node):
 
     def unstick_tick(self):
         u = self.unstick
+        if u['esc'] is not None:
+            self.escape_tick(time.monotonic())
+            return
         if u['bt'] is None:
             return
         now = time.monotonic()

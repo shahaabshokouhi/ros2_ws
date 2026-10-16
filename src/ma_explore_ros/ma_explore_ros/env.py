@@ -1,4 +1,4 @@
-# Copied from ma_explore (7ccc3f9) by ma_explore.robot_package: edit it there, not here.
+# Copied from ma_explore (7ccc3f9+changes) by ma_explore.robot_package: edit it there, not here.
 """Batched multi-robot exploration environment on the GPU.
 
 B environments x N robots step together. Each robot has its OWN map (what it
