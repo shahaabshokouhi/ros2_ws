@@ -1,4 +1,4 @@
-# Copied from ma_explore (7ccc3f9+changes) by ma_explore.robot_package: edit it there, not here.
+# Copied from ma_explore (15f02ee) by ma_explore.robot_package: edit it there, not here.
 """ROS 2 planner for one robot: picks its next exploration goal and sends it to Nav2.
 
     python -m ma_explore.ros_planner --ros-args -p agent:=sim_1 -p agents:="sim_1 sim_2 sim_3" \\
@@ -79,7 +79,9 @@ out to `escape_target` m without coming closer to an obstacle or entering
 unknown ground, in up to `escape_segments` arcs at `escape_speed`, directly on
 cmd_vel. It stops a segment when the wheels do not move, when tracking is lost,
 or, driving forward, when the depth scan (/<agent>/orb_slam3/scan) shows an
-obstacle within `escape_scan_stop` m ahead; then the costmaps are cleared and it
+obstacle within `escape_scan_stop` m ahead that is 2 cm closer than when the
+segment began (a car wedged facing a wall sees it close from the start and may
+still turn away from it); then the costmaps are cleared and it
 decides again. Events 'stuck_clear', 'stuck_escape', 'stuck_escaped',
 'stuck_backup', 'stuck_help' go to <agent>_slam_events.csv. /ma_explore/<agent>/enable
 (std_msgs/Bool) switches exploring off (the goal is cancelled) and on.
@@ -180,6 +182,8 @@ class Planner(Node):
         self.event_check_s = p('event_check_s', 2.0)
         self.progress_s = p('progress_s', 20.0)       # events: no progress for this long = the goal failed
         self.progress_m = p('progress_m', 0.25)
+        self.progress_keep_m = p('progress_keep_m', 1.0)    # a goal moved less than this keeps its progress clock
+        self.reoffer_min_m = p('reoffer_min_m', 0.5)        # reached goals this close to the car are not offered again
         self.stay_wait = p('stay_wait', 2.0)
         self.block_time = p('block_time', 60.0)
         self.merge_fresh = p('merge_fresh', 6.0)
@@ -247,9 +251,11 @@ class Planner(Node):
             pol = self.revisit_first(pol, env_cfg)
         # the policy's team size: robots that are not there count as never merged (as before a merge)
         self.team = max(len(self.agents), env_cfg.n_agents)
-        # new goals kept clear of known obstacles (m; Nav2's inflation is 0.25 m for the car): baselines
-        # need it on the full stack (else they pick frontier cells by walls that Nav2 cannot reach);
-        # -1 = auto: 0.25 m for baselines, off for a trained policy (as in training; 0 failed goals in Isaac)
+        # new goals kept clear of known obstacles (m; Nav2's inflation is 0.25 m for the car): the rule-based
+        # policies of baselines.py (coordinated, nearest, ...) that choose among the policy's candidates need it
+        # on the full stack (else they pick frontier cells by walls that Nav2 cannot reach); -1 = auto: 0.25 m for
+        # those, off for a trained policy (as in training). The published methods (classic_planner.py) choose
+        # their own targets and do not use it.
         gc = p('goal_clearance', -1.0)
         learned = policy.startswith('rl:') or policy.endswith('.pt')     # on the robots: a plain policy file
         gc = (0.0 if learned else 0.25) if gc < 0 else gc
@@ -603,7 +609,7 @@ class Planner(Node):
             self.publish_goal()
         if not self.enabled:
             return
-        if self.unstick['bt'] is not None or self.unstick['esc'] is not None:   # unstick_tick drives
+        if self.unsticking():                       # unstick_tick drives
             return
         if (self.unstick_test_at > 0 and self.t_start is not None and now - self.t_start > self.unstick_test_at):
             self.unstick_test_at = -1.0 if self.unstick['step'] >= 1 else self.unstick_test_at + 15.0
@@ -617,6 +623,7 @@ class Planner(Node):
                 self.get_logger().info(f'{self.me}: at ({self.goal[0]:.2f}, {self.goal[1]:.2f}) within '
                                        f'{math.dist(xy, self.goal):.2f} m for {self.near_s:.0f} s: counted as reached')
                 self.blocked.append((self.goal[0], self.goal[1], now + self.block_time, 0.15, 'reached'))
+                self.on_reached(self.goal)
                 if self.goal_handle is not None:
                     self.goal_seq += 1                      # the cancel must not look like a failure
                     self.goal_handle.cancel_goal_async()
@@ -664,7 +671,7 @@ class Planner(Node):
                 self.goal_seq += 1                          # the cancel is not Nav2's abort
                 self.goal_handle.cancel_goal_async()
             self.fail(g, f'made no progress for {self.progress_s:.0f} s ({left:.2f} m left)')
-            return 'no progress' if (self.unstick['bt'] is None and self.unstick['esc'] is None) else None
+            return 'no progress' if not self.unsticking() else None
         if self.merge_event and frontier:
             return 'merge'
         if now - self.goal_t0 >= self.trip_max_s:
@@ -689,7 +696,7 @@ class Planner(Node):
             # only goals near ones just reached are left: offer them again rather than stand still
             # (stand-off goals are often near where the car is; real robot, 13 October)
             res = self.decider.decide(robots, self.trail, self.mission_t(), tick=self.tick_now(),
-                                      blocked=[(b[0], b[1], b[3]) for b in self.blocked if b[4] != "reached"])
+                                      blocked=[(b[0], b[1], b[3]) for b in self.reoffer_blocks()])
             n_goals = res['n_candidates'] - (1 if self.decider.env.n_fixed() == 2 else 0)
         self.t_decisions += 1
         self.last_xy, self.last_t = self.pose[self.me][:2], now
@@ -919,6 +926,7 @@ class Planner(Node):
         x, y, _ = self.pose[self.me]
         if goal_yaw is None and goal == self.goal:
             goal_yaw = self.goal_yaw                    # resending a revisit pose keeps its heading
+        prev = self.goal
         self.goal, self.goal_yaw = goal, goal_yaw
         self.goal_seq += 1
         seq = self.goal_seq
@@ -936,7 +944,13 @@ class Planner(Node):
         else:
             yaw = math.atan2(goal[1] - y, goal[0] - x)
         msg.pose.pose.orientation.z, msg.pose.pose.orientation.w = math.sin(yaw / 2), math.cos(yaw / 2)
-        self.nav_left, self.best_left, self.best_t = None, math.inf, time.monotonic()   # progress watch from now
+        # progress watch: from now for a new goal; a goal moved by less than progress_keep_m (a planner revising
+        # its target every second) keeps the time of the last real progress, so replanning cannot hold off the
+        # no-progress failure of a car that does not advance
+        if prev is not None and math.dist(prev, goal) < self.progress_keep_m:
+            self.nav_left, self.best_left = None, math.dist((x, y), goal)
+        else:
+            self.nav_left, self.best_left, self.best_t = None, math.inf, time.monotonic()
         self.nav.send_goal_async(msg, feedback_callback=lambda fb: self.on_feedback(fb, seq)).add_done_callback(
             lambda f: self.on_accepted(f, seq, goal))
         self.publish_goal()
@@ -967,6 +981,7 @@ class Planner(Node):
                 # A reached goal is not offered again for a while: with a forward camera a
                 # frontier the car stands on can stay a frontier (training's sensor saw all around).
                 self.blocked.append((goal[0], goal[1], time.monotonic() + self.block_time, 0.15, 'reached'))
+                self.on_reached(goal)
                 x, y, yaw = self.pose[self.me]
                 msg = f'{self.me}: reached ({goal[0]:.2f}, {goal[1]:.2f}) at {math.dist((x, y), goal):.2f} m'
                 if self.goal_yaw is not None:
@@ -979,6 +994,20 @@ class Planner(Node):
                 self.path_step(time.monotonic())
             else:
                 self.end_path()
+
+    def reoffer_blocks(self):
+        """The blocked goals that stay blocked when only goals near ones just reached are left: failed goals, and
+        reached goals within reoffer_min_m of the car (it would reach them again at once, and decide again and
+        again: a frontier under a car whose camera looks forward, Isaac, 16 Oct 2026)."""
+        xy = self.pose[self.me][:2]
+        return [b for b in self.blocked if b[4] != 'reached' or math.dist(xy, b[:2]) < self.reoffer_min_m]
+
+    def on_reached(self, goal):
+        """A goal was reached (Nav2 success, or within near_dist for near_s s); planners may keep track."""
+
+    def unsticking(self):
+        """The stuck-car layer is driving the car (back-up or wedge escape): nothing else may send goals."""
+        return self.unstick['bt'] is not None or self.unstick['esc'] is not None
 
     # ── revisit paths ─────────────────────────────────────────────────────
     def confirm_ref(self, kind, mate):
@@ -1120,7 +1149,8 @@ class Planner(Node):
         now = time.monotonic()
         w = self.wheel_hist[-1] if self.wheel_hist else None
         wheel = w if (w is not None and now - w[0] < 0.5) else None
-        self.unstick['esc'] = {'plan': plan, 'segments': n, 't_drive': now, 'driven': 0.0,
+        front0 = self.scan_front[0] if now - self.scan_front[1] < 0.5 else math.inf
+        self.unstick['esc'] = {'plan': plan, 'segments': n, 't_drive': now, 'driven': 0.0, 'front0': front0,
                                'last': wheel[1:3] if wheel else None, 'check': (now, wheel[1:3] if wheel else None)}
 
     def escape_tick(self, now):
@@ -1140,8 +1170,9 @@ class Planner(Node):
             stop = 'done (timed: no wheel odometry)'
         elif now - e['t_drive'] > 3.0 * length / max(self.escape_speed, 1e-3) + 2.0:
             stop = 'time up'
-        elif sign > 0 and now - self.scan_front[1] < 0.5 and self.scan_front[0] < self.escape_scan_stop:
-            stop = f'obstacle {100 * self.scan_front[0]:.0f} cm ahead'
+        elif (sign > 0 and now - self.scan_front[1] < 0.5 and self.scan_front[0] < self.escape_scan_stop
+              and self.scan_front[0] < e['front0'] - 0.02):
+            stop = f'obstacle {100 * self.scan_front[0]:.0f} cm ahead and closer than at the start'
         else:
             t0, xy0 = e['check']
             if now - t0 > 3.0:

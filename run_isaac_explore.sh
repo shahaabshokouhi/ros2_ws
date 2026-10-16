@@ -168,6 +168,19 @@ export ROS_DOMAIN_ID=${SIM_DOMAIN:-31}
     echo "ma_explore: $(git -C "$MAX" rev-parse --short HEAD) $(git -C "$MAX" status --porcelain | wc -l) changed files"
     env | grep '^MA_NEW_' || true
 } > "$RAW/env.txt"
+# the exact code of this session: each repository's commit, its uncommitted changes as a patch, its untracked
+# source files, and the built SLAM library's checksum (a commit hash and a count of changed files cannot
+# reconstruct a session's code)
+CS="$RAW/code_state"; mkdir -p "$CS"
+for repo in "ros2_ws:$WS" "ORB_SLAM3:$HOME/ORB_SLAM3" "ma_explore:$MAX"; do
+    n="${repo%%:*}"; d="${repo#*:}"
+    git -C "$d" rev-parse HEAD > "$CS/$n.commit"
+    git -C "$d" diff --binary HEAD > "$CS/$n.patch"
+    git -C "$d" ls-files --others --exclude-standard > "$CS/$n.untracked"
+    ( cd "$d" && grep -E '\.(py|sh|cc|cpp|h|hpp|yaml|json|xml|txt|launch)$' "$CS/$n.untracked" | while read -r f; do
+          [ "$(stat -c %s "$f")" -lt 1000000 ] && mkdir -p "$CS/$n.files/$(dirname "$f")" && cp "$f" "$CS/$n.files/$f"; done ) || true
+done
+sha256sum "$HOME/ORB_SLAM3/lib/libORB_SLAM3.so" "$WS/install/orb_slam3/lib/orb_slam3/orb_slam3_node" > "$CS/binaries.sha256" 2>/dev/null || true
 
 # 1. Isaac Sim with the cars at their start poses.
 POSES=$(python3 src/jetracer_sim/jetracer_sim/routes.py "$SPEC")
