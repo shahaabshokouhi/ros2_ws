@@ -1,4 +1,4 @@
-# Copied from ma_explore (6789422+changes) by ma_explore.robot_package: edit it there, not here.
+# Copied from ma_explore (7ccc3f9) by ma_explore.robot_package: edit it there, not here.
 """Load a trained actor for deployment, and export the slim file the robots use.
 
 A robot needs only the actor and the environment settings it was trained

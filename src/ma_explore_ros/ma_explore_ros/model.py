@@ -1,4 +1,4 @@
-# Copied from ma_explore (6789422+changes) by ma_explore.robot_package: edit it there, not here.
+# Copied from ma_explore (7ccc3f9) by ma_explore.robot_package: edit it there, not here.
 """Actor (decentralized: one robot's own observation) and critic (centralized:
 global state, used in training only).
 

@@ -1,4 +1,4 @@
-# Copied from ma_explore (6789422+changes) by ma_explore.robot_package: edit it there, not here.
+# Copied from ma_explore (7ccc3f9) by ma_explore.robot_package: edit it there, not here.
 """Batched multi-robot exploration environment on the GPU.
 
 B environments x N robots step together. Each robot has its OWN map (what it
@@ -137,8 +137,8 @@ Outcome reward (16 Oct 2026; reward_mode 'outcome', revisit_path, loop_model 'kf
     An action that fails (no path to its goal, a trip of trip_max_steps) is
     paid its costs only. All other weights are unused.
   * A revisit (a merged teammate's path, or the robot's own older path)
-    drives path_poses poses of that path, path_spacing ticks of that robot's
-    motion apart, in the order it drove them (so the camera looks the way it
+    drives path_poses poses of that path, each path_spacing cells (straight
+    line) from the one before, in the order it drove them (so the camera looks the way it
     looked then): the first with the heading it had there, then on along the
     path. At the last pose it waits up to settle_s (one SLAM manager cycle)
     for the correction the revisit is for, a loop closure (own path) or a link
@@ -159,6 +159,19 @@ the mission with chance 1 - lost_man_recover (the cars' camera then faces a wall
 path did not relocalize: 0 of 9). Other losses (lost_p0, lost_lag, lost_turn) end after lost_ticks with chance
 lost_recover, else they too last the mission. A robot lost for good stands still. With cand_bearing the robot
 sees where each candidate lies from the way it faces (cos, sin), so it can learn which goals need a manoeuvre.
+Refit the same evening (lost_near): 10 of the 11 permanent losses came with an obstacle within 0.3 m in front of
+the camera, which is what loses tracking (turns near walls); while moving with an obstacle within near_cells in
+the camera's view a robot loses tracking with chance lost_near per tick, recovered with chance lost_near_recover.
+
+Map value (16 Oct 2026; reward_mode 'map'): SLAM accuracy first, coverage second. Area a robot maps that nobody
+had seen is worth w_area per m^2 x q(d), q(d) = exp(-d / d_ref), d its drift then (each tick's area and drift are
+logged). A correction restores value: a loop scales the drift of the area mapped since its old view (and since
+the last correction) by the share it cuts, a link that of the area mapped since the last correction, and the
+value regained is paid. So a loop is worth more the more area has been mapped since the last one, and area mapped
+with high drift is worth little: explore a stretch, close a loop, explore on. Merges pay as with 'outcome' (w_merge),
+time costs time_cost; payment as 'outcome' (when the action ends; a failed action: its costs only). The drift rate
+can be drawn per episode (drift_rate .. drift_rate_max, log-uniform), and far_share of the episodes start the
+robots far_frac x the free area's diagonal apart.
 """
 import math
 from dataclasses import dataclass, field
@@ -205,7 +218,7 @@ def _obs_dims(cfg):
         d['state_scalars'] += 1
     if cfg.cand_bearing:                         # cos, sin of the candidate's bearing from the robot's heading
         d['cand'] += 2
-    if cfg.reward_mode == 'outcome':             # per robot: its running action's gains, costs, on a revisit path
+    if cfg.reward_mode in ('outcome', 'map'):    # per robot: its running action's gains, costs, on a revisit path
         d['state_scalars'] += 3
     return d
 
@@ -352,8 +365,8 @@ class EnvConfig:
                                    # achieved when it ends (w_cov, w_drift, w_merge, time_cost only)
     w_cov: float = 10.0            # outcome: per unit of coverage the robot added that nobody had seen
     revisit_path: bool = False     # a revisit (a teammate's or own) = path_poses poses along the old path,
-    path_poses: int = 3            # path_spacing ticks of that robot's motion apart, driven in the original
-    path_spacing: int = 8          # direction, then a wait of up to settle_s for the correction (it ends as
+    path_poses: int = 3            # path_spacing cells (straight line) apart along the old path, driven in the original
+    path_spacing: int = 8          # direction (cells, straight from pose to pose), then a wait of up to settle_s (it ends as
     settle_s: float = 10.0         # soon as the correction comes); not interrupted by events, only by failure
     # loop_model 'kf': ORB-SLAM3's loop rule (LoopClosing.cc): a keyframe per kf_ticks ticks of motion; one
     # with loop_views own old views in sight matches with chance kf_match; loop_confirm matches confirm the
@@ -372,6 +385,16 @@ class EnvConfig:
     lost_man_recover: float = 1.0
     lost_recover: float = 1.0
     cand_bearing: bool = False     # candidate features: cos and sin of its bearing from the robot's heading
+    lost_near: float = 0.0         # per moving tick with an obstacle within near_cells in the camera's view ...
+    near_cells: float = 3.0        # ... (the lab: 10 of 11 permanent losses; 2.65e-3 per 0.67 s tick there)
+    lost_near_recover: float = 1.0 # chance such a loss is recovered after lost_ticks
+    # map value (reward_mode 'map', 16 Oct 2026; module docstring "Map value"): new area pays w_area per m^2 x
+    # exp(-drift / d_ref); a correction pays the value it restores to the area mapped since (loop: since its old view)
+    d_ref: float = 0.10            # m: drift at which mapped area keeps exp(-1) = 37 % of its value
+    w_area: float = 0.16           # per m^2 of new area mapped with no drift (0.16: 10 per mean 61.9 m^2 training map)
+    drift_rate_max: float = 0.0    # > drift_rate: each episode's drift rate log-uniform in [drift_rate, drift_rate_max]
+    far_share: float = 0.0         # share of episodes whose robots start far apart: at least far_frac x the diagonal
+    far_frac: float = 0.45         # of the map's free extent (the lab: starts 14.6-17.5 m apart along paths)
 
 
 class ExploreEnv:
@@ -491,17 +514,29 @@ class ExploreEnv:
         if self.views:
             self.old_views = torch.zeros(B, N, device=d)                   # own old views in sight now
             self.old_view_tick = torch.zeros(B, N, dtype=torch.long, device=d)
-        assert c.reward_mode in ('step', 'outcome'), c.reward_mode
-        self.outcome = c.reward_mode == 'outcome'
+        assert c.reward_mode in ('step', 'outcome', 'map'), c.reward_mode
+        self.outcome = c.reward_mode in ('outcome', 'map')
+        self.mapval = c.reward_mode == 'map'
         self.paths = c.revisit_path
         assert not (self.outcome and not (self.graph and c.event_decisions)), 'outcome needs graph_model, event_decisions'
         assert not (self.paths and not (self.poses and c.pose_revisit and c.event_decisions)), \
             'revisit_path needs pose_revisit and event_decisions'
         assert not (c.loop_model == 'kf' and not self.views), "loop_model kf needs link_model views"
         assert not (self.paths and c.path_poses < 2), 'a revisit path has at least two poses'
+        self.TT = self.longest() * c.ticks + 1                                           # ticks per episode, at most
+        if self.mapval:
+            assert c.slam_model and c.loop_model in ('views', 'kf'), "reward_mode map needs slam_model, loop_model views/kf"
+            self.area_log = torch.zeros(B, N, self.TT, device=d)        # new area (cells) each robot mapped at each tick
+            self.dlog = torch.zeros(B, N, self.TT, device=d)            # ... and the drift it was mapped with (m)
+            self.last_corr_tick = torch.zeros(B, N, dtype=torch.long, device=d)
+            self.step_val = torch.zeros(B, N, device=d)                 # value of the new area (cells x quality)
+            self.step_repair = torch.zeros(B, N, device=d)              # value corrections restored (cells x quality)
+            self.ep_area = torch.zeros(B, device=d)                     # the mission's area and value (statistics)
+            self.ep_value = torch.zeros(B, device=d)
+        self.ep_drift_rate = torch.full((B,), c.drift_rate, device=d)   # this episode's drift rate (drift_rate_max)
+        self.near_ahead = torch.full((B, N), 99.0, device=d)            # cells to the nearest obstacle in view
         if self.paths:
             P = c.path_poses
-            self.TT = self.longest() * c.ticks + 1                                       # ticks per episode, at most
             self.path_log = torch.zeros(B, N, self.TT, 2, dtype=torch.int16, device=d)   # each robot's cell per tick
             # ticks of motion (driving or turning) up to each tick; beyond now: MOVE_END (sorted, for searchsorted)
             self.move_log = torch.full((B, N, self.TT), self.MOVE_END, dtype=torch.int16, device=d)
@@ -580,11 +615,21 @@ class ExploreEnv:
         xx = torch.arange(W, device=self.dev)[None, None, :]
         mode = c.start
         cluster = (self._rand(k) < 0.5) if mode == 'mixed' else torch.full((k,), mode == 'cluster', device=self.dev)
+        sep = torch.full((k,), float(c.spread_min), device=self.dev)          # least distance between spread starts
+        if c.far_share > 0:          # far apart: a share of the free area's bounding-box diagonal
+            st = self.stand[idx]
+            rows, cols = st.any(2).float(), st.any(1).float()
+            ar_h, ar_w = torch.arange(H, device=self.dev).float(), torch.arange(W, device=self.dev).float()
+            hgt = (rows * ar_h).amax(1) - torch.where(rows > 0, ar_h, torch.full_like(ar_h, 1e9)).amin(1)
+            wid = (cols * ar_w).amax(1) - torch.where(cols > 0, ar_w, torch.full_like(ar_w, 1e9)).amin(1)
+            far_ep = self._rand(k) < c.far_share
+            cluster = cluster & ~far_ep
+            sep = torch.where(far_ep, torch.maximum(sep, c.far_frac * torch.hypot(hgt, wid)), sep)
         for a in range(1, N):
             near = ((yy - pos[:, 0, 0, None, None]) ** 2 + (xx - pos[:, 0, 1, None, None]) ** 2) <= c.cluster_radius ** 2
             far = torch.ones_like(near)
             for b2 in range(a):
-                far &= ((yy - pos[:, b2, 0, None, None]) ** 2 + (xx - pos[:, b2, 1, None, None]) ** 2) >= c.spread_min ** 2
+                far &= ((yy - pos[:, b2, 0, None, None]) ** 2 + (xx - pos[:, b2, 1, None, None]) ** 2) >= (sep ** 2)[:, None, None]
             w = torch.where(cluster[:, None, None], near, far).flatten(1).float() * stand
             w = torch.where(w.sum(1, keepdim=True) > 0, w, stand)                # fall back: anywhere
             pick = torch.multinomial(w, 1, generator=self.gen).squeeze(1)
@@ -660,6 +705,13 @@ class ExploreEnv:
             for name in ('opt_pos', 'opt_neg', 'step_dadd', 'step_drem', 'step_mgain'):
                 getattr(self, name)[idx] = 0
             self.opt_fail[idx] = False
+        if self.mapval:
+            for name in ('area_log', 'dlog', 'last_corr_tick', 'step_val', 'step_repair', 'ep_area', 'ep_value'):
+                getattr(self, name)[idx] = 0
+        if c.drift_rate_max > c.drift_rate:
+            lo, hi = math.log(c.drift_rate), math.log(c.drift_rate_max)
+            self.ep_drift_rate[idx] = torch.exp(lo + (hi - lo) * self._rand(k))
+        self.near_ahead[idx] = 99.0
         self._sense(idx)
         self._merge()
         tc, kc = self._coverage()
@@ -703,6 +755,12 @@ class ExploreEnv:
                 vi = vi[fv[vi] < 0]
                 fv[vi] = self.tick[envs][vi // (N * H * W * nb)].to(torch.int16)
                 self.first_view[envs] = fv.view(k, N, H, W, nb)
+        if self.cfg.lost_near > 0:   # the nearest obstacle the camera sees (cells): losses near obstacles
+            r_ = occ_i // (H * W)
+            cell = occ_i % (H * W)
+            dist = torch.hypot((cell // W - pos[r_, 0]).float(), (cell % W - pos[r_, 1]).float())
+            na = torch.full((k * N,), 99.0, device=self.dev).scatter_reduce(0, r_, dist, reduce='amin')
+            self.near_ahead[envs] = na.view(k, N)
         sf[free_i] = True
         so[occ_i] = True
         self.seen_free[envs] = sf.view(k, N, H, W)
@@ -960,11 +1018,18 @@ class ExploreEnv:
             self.step_dadd.zero_()
             self.step_drem.zero_()
             self.step_mgain.zero_()
+        if self.mapval:
+            self.step_val.zero_()
+            self.step_repair.zero_()
         for _ in range(c.ticks):
             moving, steplen, turn = self._drive()
+            if self.mapval:
+                tb = self.seen_free.any(1) & self.target
             new_cells = self._sense()
             if c.slam_model:
                 self._slam_tick(moving, steplen, turn, new_cells)
+            if self.mapval:
+                self._map_tick(tb)
             if self.paths:          # the settle wait: one tick less, over at once when the correction has come
                 self.settle = torch.where(self.confirmed, torch.zeros_like(self.settle), (self.settle - 1).clamp(min=0))
         self._merge()
@@ -1043,6 +1108,8 @@ class ExploreEnv:
             err = self.merge_err()[done]
             info.update({'done_lam2': self.lam2[done].mean(1), 'done_unc': self.unc[done].mean(1),
                          'done_merge_err': (err * mate).sum((1, 2)) / mate.sum((1, 2)).clamp(min=1)})
+        if self.mapval:      # the map's quality: its value per cell (1 = mapped with no drift)
+            info['done_quality'] = self.ep_value[done] / self.ep_area[done].clamp(min=1)
         return info
 
     def _outcome_step(self, done, team_before):
@@ -1050,10 +1117,14 @@ class ExploreEnv:
         paid when it ends -- at the robot's next decision (observe: ask_now) or at the end of the mission. A
         failed action (no path, too long a trip) is paid its costs only."""
         c, B, N = self.cfg, self.B, self.N
-        mine = self.seen_free & self.target[:, None] & ~team_before[:, None]
-        self.step_own = mine.flatten(2).sum(2) / self.n_target[:, None]
-        self.opt_pos += c.w_cov * self.step_own + c.w_drift * self.step_drem + c.w_merge * self.step_mgain
-        self.opt_neg -= c.time_cost + c.w_drift * self.step_dadd
+        if self.mapval:      # accuracy-weighted area (m^2 at 0.1 m cells) and the value corrections restored
+            self.opt_pos += c.w_area * 0.01 * (self.step_val + self.step_repair) + c.w_merge * self.step_mgain
+            self.opt_neg -= c.time_cost + c.w_drift * self.step_dadd
+        else:
+            mine = self.seen_free & self.target[:, None] & ~team_before[:, None]
+            self.step_own = mine.flatten(2).sum(2) / self.n_target[:, None]
+            self.opt_pos += c.w_cov * self.step_own + c.w_drift * self.step_drem + c.w_merge * self.step_mgain
+            self.opt_neg -= c.time_cost + c.w_drift * self.step_dadd
         reward = torch.zeros(B, N, device=self.dev)
         end = done[:, None].expand(B, N)                  # the mission ends: every action ends with it
         reward = torch.where(end, self._payout(), reward)
@@ -1098,17 +1169,22 @@ class ExploreEnv:
             recover = torch.where(man, torch.full_like(p, c.lost_man_recover), recover)
             newly = newly | man
             self.manoeuvre.zero_()
-        if c.lost_manoeuvre or c.lost_recover < 1.0:                     # (no extra draw for the old model)
+        if c.lost_near > 0:                        # moving with an obstacle close in front of the camera
+            nr = moving & ~lost_now & ~newly & (self.near_ahead <= c.near_cells) & (self._rand(B, N) < c.lost_near)
+            recover = torch.where(nr, torch.full_like(p, c.lost_near_recover), recover)
+            newly = newly | nr
+        if c.lost_manoeuvre or c.lost_near or c.lost_recover < 1.0:      # (no extra draw for the old model)
             self.lost_for_good |= newly & (self._rand(B, N) >= recover)  # never relocalizes
         self.lost = torch.where(newly, torch.full_like(self.lost, c.lost_ticks), (self.lost - 1).clamp(min=0))
         self.lost = torch.where(self.lost_for_good, torch.full_like(self.lost, c.lost_ticks), self.lost)
         self.step_lost += (self.lost > 0).float().sum(1)
         # drift
         metres = 0.1 * steplen
-        added = c.drift_rate * metres * (1 + c.drift_lag * lag) + c.lost_drift * newly.float()
+        rate = self.ep_drift_rate[:, None]
+        added = rate * metres * (1 + c.drift_lag * lag) + c.lost_drift * newly.float()
         self.drift = self.drift + added
         drift_before = self.drift
-        avoidable = c.drift_rate * metres * c.drift_lag * self.backlog + c.lost_drift * newly.float()
+        avoidable = rate * metres * c.drift_lag * self.backlog + c.lost_drift * newly.float()
         self.since_corr = self.since_corr + metres
         # loop closure: back on ground this robot saw long ago
         bi = torch.arange(B, device=d)[:, None].expand(B, N)
@@ -1167,6 +1243,14 @@ class ExploreEnv:
         if self.outcome:
             self.step_dadd += added
             self.step_drem += (drift_before - self.drift).clamp(min=0)
+        if self.mapval:                  # a correction restores the value of the area mapped since (a loop: since its old view)
+            corr = loop | any_link
+            if corr.any():
+                ratio = (self.drift / drift_before.clamp(min=1e-9)).clamp(0, 1)
+                old = self.old_view_tick if then_tick is None else then_tick
+                start = torch.where(loop, torch.minimum(old, self.last_corr_tick), self.last_corr_tick)
+                self._repair(corr, ratio, start)
+            self.last_corr_tick = torch.where(corr, tick.expand(B, N), self.last_corr_tick)
         if self.paths:
             # the correction a revisit path is for: a loop closure (own path) or a link with that teammate
             on = (self.wp_i < c.path_poses) | (self.settle > 0)
@@ -1185,6 +1269,36 @@ class ExploreEnv:
                 self.node_at[torch.arange(B, device=d)[:, None], torch.arange(N, device=d)[None], t_[:, None]] = \
                     (self.mticks // c.node_ticks).clamp(max=self.M - 1).to(torch.int16)
         self.tick += 1
+
+    def _q(self, drift):
+        """The value of area mapped with this drift (m), per cell of no drift."""
+        return torch.exp(-drift / self.cfg.d_ref)
+
+    def _repair(self, m, ratio, start):
+        """Robots m (B, N) corrected their map: the drift of the area they mapped from tick `start` on is scaled by
+        `ratio`; the value it regains goes to step_repair."""
+        b, i = m.nonzero(as_tuple=True)
+        ar = torch.arange(self.TT, device=self.dev)[None]
+        seg = (ar >= start[b, i][:, None]) & (ar < self.tick[b][:, None])
+        dl, area = self.dlog[b, i], self.area_log[b, i]
+        new = torch.where(seg, dl * ratio[b, i][:, None], dl)
+        gain = (area * (self._q(new) - self._q(dl))).sum(1)
+        self.step_repair.index_put_((b, i), gain, accumulate=True)
+        self.ep_value.index_add_(0, b, gain)
+        self.dlog[b, i] = new
+
+    def _map_tick(self, team_before):
+        """reward_mode 'map': the area each robot mapped this tick that nobody had seen, logged with its drift."""
+        B, N = self.B, self.N
+        cells = (self.seen_free & self.target[:, None] & ~team_before[:, None]).flatten(2).sum(2).float()
+        t_ = (self.tick - 1).clamp(0, self.TT - 1)
+        bi, ni = torch.arange(B, device=self.dev)[:, None], torch.arange(N, device=self.dev)[None]
+        self.area_log[bi, ni, t_[:, None]] = cells
+        self.dlog[bi, ni, t_[:, None]] = self.drift
+        v = cells * self._q(self.drift)
+        self.step_val += v
+        self.ep_area += cells.sum(1)
+        self.ep_value += v.sum(1)
 
     def _kf_loops(self, moving, ok, tick):
         """loop_model 'kf' (EnvConfig): ORB-SLAM3's loop rule. Returns the loops that land now (B, N) and
@@ -1415,17 +1529,24 @@ class ExploreEnv:
         return (tt >= 0) & (at + (c.path_poses - 1) * c.path_spacing <= self.moved[..., None])
 
     def _path_from(self, j, flat):
-        """Revisit paths of slots (B, N, n) at cells `flat` of robot j's path (j: (B, N, n)): the path_poses
-        cells of j's path from its last visit there on, path_spacing ticks of its motion apart (B, N, n, P, 2)."""
+        """Revisit paths of slots (B, N, n) at cells `flat` of robot j's path (j: (B, N, n)): path_poses cells of
+        j's path from its last visit there on, each the first one at least path_spacing cells (straight line) from
+        the one before -- so a car that manoeuvred there still gets legs of that length -- or, if the path has
+        not gone that far yet, its newest cell (B, N, n, P, 2)."""
         c, B, N, d = self.cfg, self.B, self.N, self.dev
         n = flat.shape[2]
         bi = torch.arange(B, device=d)[:, None, None].expand(B, N, n)
-        tau = self.trail_tick.view(B, N, -1)[bi, j, flat].long().clamp(0, self.TT - 1)
-        m0 = self.move_log[bi, j, tau].long()
-        target = (m0[..., None] + c.path_spacing * torch.arange(c.path_poses, device=d)).int()
-        seq = self.move_log[bi, j].int()                                               # (B, N, n, TT), sorted
-        tk = torch.searchsorted(seq.contiguous(), target.contiguous()).clamp(max=self.TT - 1)
-        return self.path_log[bi[..., None], j[..., None], tk].long()
+        cur = self.trail_tick.view(B, N, -1)[bi, j, flat].long().clamp(0, self.TT - 1)
+        last = (self.tick[bi] - 1).clamp(0, self.TT - 1)                          # the newest logged tick
+        seq = self.path_log[bi, j].float()                                         # (B, N, n, TT, 2)
+        ar = torch.arange(self.TT, device=d)
+        cells = [self.path_log[bi, j, cur].long()]
+        for _ in range(c.path_poses - 1):
+            far = (seq - cells[-1].float()[..., None, :]).norm(dim=-1) >= c.path_spacing
+            ok = far & (ar > cur[..., None]) & (ar <= last[..., None])
+            cur = torch.where(ok.any(-1), ok.float().argmax(-1), last)
+            cells.append(self.path_log[bi, j, cur].long())
+        return torch.stack(cells, 3)
 
     @staticmethod
     def _lam2_feat(lam2):

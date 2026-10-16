@@ -1,4 +1,4 @@
-# Copied from ma_explore (6789422+changes) by ma_explore.robot_package: edit it there, not here.
+# Copied from ma_explore (7ccc3f9) by ma_explore.robot_package: edit it there, not here.
 """ROS 2 planner for one robot: picks its next exploration goal and sends it to Nav2.
 
     python -m ma_explore.ros_planner --ros-args -p agent:=sim_1 -p agents:="sim_1 sim_2 sim_3" \\
@@ -61,7 +61,7 @@ temporary map: tracking 'OK', but no pose until it is back in the main map);
 each loss and recovery is a row of <out>/<agent>_slam_events.csv (where, the
 heading, the goal and its bearing, how long).
 Stuck car (unstick, a safety layer that does not change the policy): when
-`unstick_aborts` goals are aborted within `unstick_window` s while the car moved
+`unstick_aborts` goals fail (aborted, or no progress) within `unstick_window` s while the car moved
 less than `unstick_move` m, Nav2's costmaps hold obstacles all around it -- in
 Isaac, teammates that drove close by stay marked beside and behind a car after
 they have left, because a mark is erased only when the forward camera sees the
@@ -195,7 +195,9 @@ class Planner(Node):
         # stuck car (module docstring): clear the costmaps, then back up along the path driven, then ask for help
         self.unstick_on = p('unstick', True)
         self.unstick_aborts = int(p('unstick_aborts', 3))
-        self.unstick_window = p('unstick_window', 40.0)      # s
+        # s: 3 failed goals within it (a goal without progress fails only after progress_s, 20 s, and the car was
+        # wedged against a pallet for 3 min while such failures came every 25-30 s: Isaac lab, 15 Oct; 40 s until then)
+        self.unstick_window = p('unstick_window', 100.0)
         self.unstick_move = p('unstick_move', 0.15)          # m: moved less than this while the goals failed
         self.unstick_back = p('unstick_back', 0.3)           # m backed up in step 2
         self.unstick_reset = p('unstick_reset', 120.0)       # s: a later stuck spell starts again at step 1
