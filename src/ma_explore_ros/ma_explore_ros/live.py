@@ -1,4 +1,4 @@
-# Copied from ma_explore (15f02ee) by ma_explore.robot_package: edit it there, not here.
+# Copied from ma_explore (2609e08) by ma_explore.robot_package: edit it there, not here.
 """Decisions from live maps: the bridge between a running robot and the policy.
 
 No ROS here, so it can be tested on its own. A robot's planner (ros_planner.py)

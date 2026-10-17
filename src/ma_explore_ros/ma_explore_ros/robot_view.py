@@ -1,4 +1,4 @@
-# Copied from ma_explore (15f02ee) by ma_explore.robot_package: edit it there, not here.
+# Copied from ma_explore (2609e08) by ma_explore.robot_package: edit it there, not here.
 """Live view of exploring robots without ground truth (real robots): one panel
 per robot, in that robot's own map frame (a window; it only watches).
 

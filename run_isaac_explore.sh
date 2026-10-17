@@ -181,6 +181,10 @@ for repo in "ros2_ws:$WS" "ORB_SLAM3:$HOME/ORB_SLAM3" "ma_explore:$MAX"; do
           [ "$(stat -c %s "$f")" -lt 1000000 ] && mkdir -p "$CS/$n.files/$(dirname "$f")" && cp "$f" "$CS/$n.files/$f"; done ) || true
 done
 sha256sum "$HOME/ORB_SLAM3/lib/libORB_SLAM3.so" "$WS/install/orb_slam3/lib/orb_slam3/orb_slam3_node" > "$CS/binaries.sha256" 2>/dev/null || true
+# what else the session executes: the policy file, the planner's Python packages, the ROS packages
+[ -n "$CKPT" ] && sha256sum "$CKPT" > "$CS/checkpoint.sha256"
+{ "$PY" --version; "$PY" -m pip freeze 2>/dev/null; } > "$CS/python_env.txt" 2>&1 || true
+dpkg-query -W -f='${Package} ${Version}\n' 'ros-humble-*' > "$CS/ros_packages.txt" 2>/dev/null || true
 
 # 1. Isaac Sim with the cars at their start poses.
 POSES=$(python3 src/jetracer_sim/jetracer_sim/routes.py "$SPEC")

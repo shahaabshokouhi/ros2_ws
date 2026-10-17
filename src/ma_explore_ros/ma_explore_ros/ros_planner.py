@@ -1,4 +1,4 @@
-# Copied from ma_explore (15f02ee) by ma_explore.robot_package: edit it there, not here.
+# Copied from ma_explore (2609e08) by ma_explore.robot_package: edit it there, not here.
 """ROS 2 planner for one robot: picks its next exploration goal and sends it to Nav2.
 
     python -m ma_explore.ros_planner --ros-args -p agent:=sim_1 -p agents:="sim_1 sim_2 sim_3" \\
