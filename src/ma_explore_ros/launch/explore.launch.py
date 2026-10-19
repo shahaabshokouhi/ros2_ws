@@ -59,7 +59,7 @@ def setup(context):
         parameters=[{'agent': agent, 'agents': agents, 'policy': policy, 'device': get('device'),
                      'frame_prefix': 'agent' if frames == 'prefixed' else 'none', 'out': out,
                      'start_enabled': get('start_enabled').lower() in ('true', '1', 'yes'),
-                     'goal_standoff': int(get('goal_standoff'))}],
+                     'goal_standoff': int(get('goal_standoff')), 'mission_s': float(get('mission_s') or 0)}],
         # torch.compile needs a C++ toolchain and takes long to warm up on the robot: plain kernels
         additional_env={'MA_EXPLORE_NO_COMPILE': '1', 'OMP_NUM_THREADS': '2'},
     )]
@@ -74,6 +74,7 @@ def generate_launch_description():
         DeclareLaunchArgument('device', default_value='cpu'),
         DeclareLaunchArgument('start_enabled', default_value='true'),
         DeclareLaunchArgument('goal_standoff', default_value='5'),
+        DeclareLaunchArgument('mission_s', default_value='0'),   # s; the policy's time input (0: counts decisions)
         DeclareLaunchArgument('out', default_value='~/result/ma_explore_robot'),
         OpaqueFunction(function=setup),
     ])

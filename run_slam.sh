@@ -13,7 +13,7 @@
 #                         ros2 run ma_explore_ros robot_view --ros-args -p agents:="AGENT"
 #
 #   ./run_slam.sh [--method new|hq-mpshare] [--grid] [--teleop] [--nav | --nav-wheels]
-#                 [--explore [--team "A B C"] [--policy FILE]] [--ma-frames] [--save] [--imu] [--monitor]
+#                 [--explore [--team "A B C"] [--policy FILE] [--mission S]] [--ma-frames] [--save] [--imu] [--monitor]
 #
 #   --method      how robots share maps: new (default; keyframe sharing) or hq-mpshare
 #                 (sharing of high-quality map points)
@@ -26,6 +26,8 @@
 #                 Pause it: ros2 topic pub --once /ma_explore/AGENT/enable std_msgs/msg/Bool "{data: false}"
 #   --team "A B C"  with --explore: the whole team's agent names (several robots: add --ma-frames)
 #   --policy FILE   with --explore: another policy file
+#   --mission S     with --explore: the mission length in seconds (the policy's time input is the share of it
+#                   gone, as in training; about 6 s per m^2 of free floor). Without it the input counts decisions
 #   --ma-frames   several robots on one ROS domain: this robot's TF frames get its name as
 #                 prefix (AGENT/map_nav, AGENT/odom, ...)
 #   --save        save every keyframe's RGB + depth and the final poses (folder slam_00N in
@@ -56,6 +58,7 @@ MA_FRAMES=false
 EXPLORE=false
 EXPLORE_TEAM=""
 EXPLORE_POLICY=""
+EXPLORE_MISSION=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --save)
@@ -106,6 +109,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --policy)
             EXPLORE_POLICY="$(realpath "$2")"
+            shift 2
+            ;;
+        --mission)
+            EXPLORE_MISSION="$2"
             shift 2
             ;;
         *)
@@ -211,6 +218,7 @@ fi
 if [ "$EXPLORE" = "true" ]; then
     LAUNCH_ARGS+=(explore:=true explore_policy:="$POL")
     [ -n "$EXPLORE_TEAM" ] && LAUNCH_ARGS+=(explore_team:="$EXPLORE_TEAM")
+    [ -n "$EXPLORE_MISSION" ] && LAUNCH_ARGS+=(explore_mission_s:="$EXPLORE_MISSION")
 fi
 
 # Optional CPU dedication for the tracking thread (see the core-dedication

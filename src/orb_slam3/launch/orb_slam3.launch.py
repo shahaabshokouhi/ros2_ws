@@ -112,6 +112,8 @@ def generate_launch_description():
         DeclareLaunchArgument('explore_policy', default_value='',
                               description='With explore: the policy file (default ma_explore_ros policy/policy.pt)'),
         DeclareLaunchArgument('explore_device', default_value='cpu'),
+        DeclareLaunchArgument('explore_mission_s', default_value='0',
+                              description='With explore: the mission length in s (0: the time input counts decisions)'),
         DeclareLaunchArgument(
             'nav_pose',
             default_value='slam',
@@ -341,6 +343,7 @@ def launch_nodes(context):
                               'agents': LaunchConfiguration('explore_team').perform(context),
                               'policy': LaunchConfiguration('explore_policy').perform(context),
                               'device': LaunchConfiguration('explore_device').perform(context),
+                              'mission_s': LaunchConfiguration('explore_mission_s').perform(context),
                               'frames': 'prefixed' if frame_prefix else 'plain'}.items()))
 
     return nodes
