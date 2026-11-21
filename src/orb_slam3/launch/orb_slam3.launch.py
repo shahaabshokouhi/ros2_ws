@@ -122,6 +122,13 @@ def generate_launch_description():
                         'drives and reports speed); wheels: wheel odometry, corrected by SLAM'
         ),
         DeclareLaunchArgument(
+            'nav_bridge',
+            default_value='true',
+            description='With nav: after a tracking loss, place the new SLAM map in the main map by '
+                        'wheel odometry and carry on (provisional until it merges); false: hold the '
+                        'car until the new map merges (occupancy_mapper.hpp)'
+        ),
+        DeclareLaunchArgument(
             'camera',
             default_value='true',
             description='Start the RealSense driver (false when the images come from '
@@ -185,6 +192,8 @@ def launch_nodes(context):
     nav             = LaunchConfiguration('nav').perform(context).strip().lower() \
         in ('true', '1', 'yes', 'on')
     nav_pose        = LaunchConfiguration('nav_pose').perform(context).strip().lower()
+    nav_bridge      = LaunchConfiguration('nav_bridge').perform(context).strip().lower() \
+        in ('true', '1', 'yes', 'on')
     if nav_pose not in ('slam', 'wheels'):
         raise RuntimeError(f"nav_pose must be slam or wheels, not '{nav_pose}'")
 
@@ -291,6 +300,7 @@ def launch_nodes(context):
             {'nav_frames': nav},
             {'grid.map_half_size': 10.0 if nav else 0.0},   # nav: a 20 x 20 m map from the start
             {'grid.pose_source': nav_pose},
+            {'grid.bridge': nav_bridge},
             {'grid.max_range': grid_range},
             {'publish_gray': teleop},
             {'frame_prefix': frame_prefix},

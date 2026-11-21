@@ -12,7 +12,7 @@
 #   --explore             nothing (the policy runs on the robot); optional live view:
 #                         ros2 run ma_explore_ros robot_view --ros-args -p agents:="AGENT"
 #
-#   ./run_slam.sh [--method new|hq-mpshare] [--grid] [--teleop] [--nav | --nav-wheels]
+#   ./run_slam.sh [--method new|hq-mpshare] [--grid] [--teleop] [--nav | --nav-wheels] [--no-bridge]
 #                 [--explore [--team "A B C"] [--policy FILE] [--mission S]] [--ma-frames] [--save] [--imu] [--monitor]
 #
 #   --method      how robots share maps: new (default; keyframe sharing) or hq-mpshare
@@ -21,6 +21,9 @@
 #   --teleop      keyboard driving from a PC: starts the base driver and a small gray camera view
 #   --nav         --grid plus Nav2; the car's position comes from SLAM
 #   --nav-wheels  as --nav, but the position comes from wheel odometry corrected by SLAM
+#   --no-bridge   with --nav: after a tracking loss hold the car until SLAM's new map merges
+#                 back (default: place the new map by wheel odometry and carry on, provisional
+#                 until the merge)
 #   --explore     --nav plus the trained exploration policy on this robot, choosing goals by
 #                 itself (src/ma_explore_ros/policy/policy.pt; training puts it there).
 #                 Pause it: ros2 topic pub --once /ma_explore/AGENT/enable std_msgs/msg/Bool "{data: false}"
@@ -54,6 +57,7 @@ OCCUPANCY_GRID=false
 TELEOP=false
 NAV=false
 NAV_POSE=slam
+NAV_BRIDGE=true
 MA_FRAMES=false
 EXPLORE=false
 EXPLORE_TEAM=""
@@ -92,6 +96,10 @@ while [[ $# -gt 0 ]]; do
         --nav-wheels)
             NAV=true
             NAV_POSE=wheels
+            shift
+            ;;
+        --no-bridge)
+            NAV_BRIDGE=false
             shift
             ;;
         --ma-frames)
@@ -176,6 +184,37 @@ colcon build --packages-select orb_slam3 --cmake-clean-cache
 if [ "$EXPLORE" = "true" ]; then colcon build --packages-select ma_explore_ros; fi
 source install/setup.bash
 
+# Plain TF frames (map_nav, odom, base_footprint) are the same names on every
+# robot: with a second robot's SLAM on this ROS domain both would publish
+# odom -> base_footprint, and each Nav2 would mix the two robots' poses
+# (costmap "sensor origin out of map bounds", empty plans). Refuse to start.
+if [ "$NAV" = "true" ] && [ "$MA_FRAMES" != "true" ]; then
+    echo "Checking the ROS domain (${ROS_DOMAIN_ID:-0}) for other robots (3 s)..."
+    OTHERS=$(python3 - "$AGENT_NAME" <<'EOF'
+import sys, time
+import rclpy
+rclpy.init()
+n = rclpy.create_node('run_slam_frame_check')
+end = time.time() + 3.0
+while time.time() < end:
+    rclpy.spin_once(n, timeout_sec=0.2)
+found = set()
+for name, _ in n.get_topic_names_and_types():
+    part = name.split('/')       # /<agent>/orb_slam3/pose: published by each robot's SLAM node
+    if len(part) == 4 and part[2:] == ['orb_slam3', 'pose'] and part[1] != sys.argv[1] \
+            and n.get_publishers_info_by_topic(name):
+        found.add(part[1])
+print(' '.join(sorted(found)))
+EOF
+)
+    if [ -n "$OTHERS" ]; then
+        echo "Error: SLAM of other robots is running on ROS_DOMAIN_ID ${ROS_DOMAIN_ID:-0}: $OTHERS"
+        echo "  With plain TF frames the robots' Nav2 would mix their poses. Start every robot with"
+        echo "  --ma-frames (and --team \"...\" with --explore), or give this robot its own ROS_DOMAIN_ID."
+        exit 1
+    fi
+fi
+
 # ros2 launch rejects an empty '<name>:=' value, so only pass result_dir when
 # the user actually set RESULT_DIR (otherwise the node defaults to ~/result).
 LAUNCH_ARGS=(
@@ -191,6 +230,7 @@ LAUNCH_ARGS=(
     teleop:="$TELEOP"
     nav:="$NAV"
     nav_pose:="$NAV_POSE"
+    nav_bridge:="$NAV_BRIDGE"
 )
 # The base driver owns the motor board's serial port: if run_joystick.sh or
 # run_controller.sh already started it, do not start a second one.
