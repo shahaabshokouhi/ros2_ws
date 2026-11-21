@@ -1,4 +1,4 @@
-# Copied from ma_explore (2609e08) by ma_explore.robot_package: edit it there, not here.
+# Copied from ma_explore (8ace1a7+changes) by ma_explore.robot_package: edit it there, not here.
 """Load a trained actor for deployment, and export the slim file the robots use.
 
 A robot needs only the actor and the environment settings it was trained
@@ -44,7 +44,11 @@ def load_policy_file(path, device='cpu'):
         B, N = obs['planes'].shape[:2]
         flat = [obs[k].flatten(0, 1) for k in keys]
         flat[3] = flat[3].long()
-        return actor(*flat).argmax(-1).view(B, N)
+        logits = actor(*flat)
+        policy.last_probs = torch.softmax(logits, -1).view(B, N, -1)   # for the live views (why this goal)
+        return logits.argmax(-1).view(B, N)
+
+    policy.last_probs = None
 
     meta = ck.get('meta', {'run': '?', 'update': ck.get('update'), 'env_steps': ck.get('env_steps')})
     return policy, env_cfg, int(ck['config']['train']['map_size']), meta

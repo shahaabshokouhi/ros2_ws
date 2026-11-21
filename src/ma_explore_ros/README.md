@@ -24,13 +24,20 @@ every tracking loss, where, the heading, the goal's bearing, how long).
 
 ## After a tracking loss
 
-The SLAM node's safety gate stops the car and cancels the goal. The planner
-waits 2 s, then backs the car up slowly along the last 0.8 m it drove (wheel
+The SLAM node's safety gate stops the car and cancels the goal (on a failed
+tracking or a temporary map at once; with no pose, after 1.5 s, the planner's
+pose_timeout). The planner waits 2 s, then backs the car up slowly along the last 0.8 m it drove (wheel
 odometry), so the camera sees again what it saw before the loss and ORB-SLAM3
 can relocalize; up to 2 attempts, then it stops and logs that it needs help
 (drive it back with the keyboard). Parameters: recovery, recovery_wait,
 recovery_back_m, recovery_speed, recovery_attempts. Every loss and recovery is a
 row of `<agent>_slam_events.csv`.
+
+Usually the back-up is not needed: once ORB-SLAM3's new map has 300 points and
+has tracked for 1 s, the SLAM node places it in the main map by wheel odometry
+(a provisional map, `/<agent>/orb_slam3/provisional`) and publishes the pose
+again; the planner sees tracking OK and a fresh pose, ends the recovery and
+explores on until the new map merges (ros2_ws README §8).
 
 ## When the car is stuck
 
