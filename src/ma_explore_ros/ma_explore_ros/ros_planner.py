@@ -203,7 +203,7 @@ class Planner(Node):
         self.rec_on = p('recovery', True)
         self.rec_wait = p('recovery_wait', 2.0)          # s to wait first (SLAM may relocalize by itself)
         self.rec_back = p('recovery_back_m', 0.8)        # m backed up per attempt
-        self.rec_speed = p('recovery_speed', 0.1)        # m/s
+        self.rec_speed = p('recovery_speed', 0.2)        # m/s (0.1 barely moved the real car, 21 November)
         self.rec_tries = p('recovery_attempts', 2)
         # straight: reverse straight back (wheel odometry measures the distance; timed without it): the
         # usual loss is an obstacle suddenly filling the camera (real robot, 13 October). path: follow
@@ -603,7 +603,10 @@ class Planner(Node):
                 self.goal_seq += 1
                 self.goal_handle.cancel_goal_async()
             self.get_logger().warn(f'{self.me}: recovery test: acting as if tracking were lost')
-        if self.driver is not None and (not self.driver[0] or now - self.driver[1] > 0.5):
+        # The driver's flag already says whether the board is sending (0.5 s); the heartbeat itself counts
+        # as missing (driver dead) only after 2 s: a policy step (~0.6 s on the Jetson) blocks this node's
+        # callbacks, and a 0.5 s limit then raised a false alarm after nearly every decision (21 November).
+        if self.driver is not None and (not self.driver[0] or now - self.driver[1] > 2.0):
             if not self.driver_down:              # the safety gate has stopped the car and cancelled the goal
                 self.driver_down = True
                 self.get_logger().error(f'{self.me}: base driver not responding (motor board unplugged?): '

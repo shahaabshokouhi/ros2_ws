@@ -326,24 +326,29 @@ public:
         const bool inMain = pMain && cur == pMain;
         bool placed = inMain;
         if (bridgeOn() && pMain && cur) {
-            if (inMain) {
-                bridgeBackInMain(pMain, t, Twc);
-            } else {
+            if (!inMain) {
                 std::string why;
                 Sophus::SE3f Tmx;
                 if (bridgeFrame(cur, pMain, t, Tmx, why)) {
                     Twc = Tmx * Twc;
                     placed = true;
-                    lastProvTwc_ = Twc;            // to measure the jump when it merges
-                    lastProvT_ = t;
                 } else {
                     RCLCPP_INFO_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
                         "[nav] SLAM is in a new map after a tracking loss: no robot pose for Nav2 "
                         "yet (%s)", why.c_str());
                 }
             }
+            if (placed && !poseConfirmed(t, Twc)) return;     // a jump: wait for the next frame
+            if (inMain) {
+                bridgeBackInMain(pMain, t, Twc);
+            } else if (placed) {
+                lastProvTwc_ = Twc;                // to measure the jump when it merges
+                lastProvT_ = t;
+            }
             if (placed) pushGoodFrame(cur, ref, Tcw, Twc, t);
             setProvisional(placed && !inMain);
+        } else if (placed && !poseConfirmed(t, Twc)) {
+            return;
         }
         if (p_.navFrames && !placed) {
             // Lost and re-started in a temporary map: no pose for Nav2 (the
@@ -1149,6 +1154,32 @@ private:
         placedT_.swap(m);
     }
 
+    // A pose far from the last published one (0.3 m or 15 deg) is used only once the
+    // next frame agrees with it (within 0.1 m and 5 deg). At a merge ORB-SLAM3 can move
+    // the reference keyframe into the main map while the frame's pose is still in the
+    // merged map's coordinates: on the real robot (21 November) one frame came out
+    // 5.4 m and 86 deg off (the merged map's placement). A real jump (a merge's
+    // correction, a loop closure) holds for the next frames too and costs one frame.
+    bool poseConfirmed(double t, const Sophus::SE3f& Twc)
+    {
+        auto near = [](const Sophus::SE3f& a, const Sophus::SE3f& b, float m, float deg) {
+            return (a.translation() - b.translation()).norm() < m &&
+                   (a.so3().inverse() * b.so3()).log().norm() < deg * float(M_PI) / 180.0f;
+        };
+        const bool ok = !havePub_ || near(Twc, pubTwc_, 0.3f, 15.0f) ||
+                        (haveCand_ && t - candT_ < 0.5 && near(Twc, candTwc_, 0.1f, 5.0f)) ||
+                        t - pubT_ > 1.0;              // frames that never agree: do not stall
+        if (!ok) {
+            if (!haveCand_) RCLCPP_INFO(node_->get_logger(),
+                "[nav] the SLAM pose jumped %.2f m: waiting for the next frame to confirm it",
+                (Twc.translation() - pubTwc_.translation()).norm());
+            candTwc_ = Twc; candT_ = t; haveCand_ = true;
+            return false;
+        }
+        pubTwc_ = Twc; pubT_ = t; havePub_ = true; haveCand_ = false;
+        return true;
+    }
+
     // Tracking in the main map again: report how far off the placement of
     // each provisional map that has just merged was, and forget them.
     void bridgeBackInMain(ORB_SLAM3::Map* pMain, double t, const Sophus::SE3f& Twc)
@@ -1431,6 +1462,9 @@ private:
     std::map<ORB_SLAM3::Map*, Place> places_;
     Sophus::SE3f lastProvTwc_;             // the last provisional pose (main map)
     double lastProvT_ = -1.0, mergeT_ = -1e9;
+    Sophus::SE3f pubTwc_, candTwc_;        // poseConfirmed: the last used pose, a jump waiting
+    double pubT_ = 0.0, candT_ = 0.0;
+    bool havePub_ = false, haveCand_ = false;
     ORB_SLAM3::Map* lastPlacedMap_ = nullptr;
     bool provisional_ = false;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr prov_pub_;
