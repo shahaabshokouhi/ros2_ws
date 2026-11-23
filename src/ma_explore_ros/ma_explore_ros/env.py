@@ -1,4 +1,4 @@
-# Copied from ma_explore (2609e08) by ma_explore.robot_package: edit it there, not here.
+# Copied from ma_explore (8ace1a7+changes) by ma_explore.robot_package: edit it there, not here.
 """Batched multi-robot exploration environment on the GPU.
 
 B environments x N robots step together. Each robot has its OWN map (what it
@@ -172,6 +172,14 @@ with high drift is worth little: explore a stretch, close a loop, explore on. Me
 time costs time_cost; payment as 'outcome' (when the action ends; a failed action: its costs only). The drift rate
 can be drawn per episode (drift_rate .. drift_rate_max, log-uniform), and far_share of the episodes start the
 robots far_frac x the free area's diagonal apart.
+
+Team map value (18 Oct 2026; w_teammap > 0 with reward_mode 'map'): the merged team map is the map. A cell also counts in
+each merged teammate's map that holds it, there with error sqrt(d^2 + e^2), e the merge error of that teammate's
+alignment with the owner (merge_floor, merge_sigma0, merge_drift_k: the drift both robots had at the merge stays in
+it), weighted w_teammap. Every change of this value is paid to the robot whose event caused it: new area and its own
+corrections to the owner, a merge to each robot for its own area in the other's map, a link to the robot that found
+it (the value the better alignment restores to the teammate's area in its map). The payments add up to the team map's
+value. It replaces the merge unit and the link reward in units of merge error.
 """
 import math
 from dataclasses import dataclass, field
@@ -220,6 +228,9 @@ def _obs_dims(cfg):
         d['cand'] += 2
     if cfg.reward_mode in ('outcome', 'map'):    # per robot: its running action's gains, costs, on a revisit path
         d['state_scalars'] += 3
+    if cfg.obs_time_left:                        # the time left
+        d['scalars'] += 1
+        d['state_scalars'] += 1
     return d
 
 
@@ -348,6 +359,9 @@ class EnvConfig:
                                    # sqrt(merge_floor^2 + merge_sigma0^2 / (merge_n0 + links))
     merge_n0: int = 1              # measurements in the merge match itself (Isaac: 4)
     merge_floor: float = 0.0       # m: merge error that more links do not remove (Isaac: 0.02)
+    merge_drift_k: float = 0.0     # share of both robots' squared drift at the merge that stays in the alignment:
+                                   # + merge_drift_k * (drift_i^2 + drift_j^2) under the root (0: as trained until
+                                   # 18 Oct 2026; docs/calibration/merge_error_fit.py)
     w_merge: float = 1.0           # reward per sigma0 of merge error removed
     # any map size (module docstring, 15 Oct 2026): off = the first design, as trained until then
     ego_obs: bool = False          # the actor's maps centred on the robot, features in fixed units
@@ -358,6 +372,10 @@ class EnvConfig:
     steps_ref_cells: int = 0       # free cells of a map that gets max_steps decisions (0: every episode max_steps)
     min_steps: int = 40            # shortest and ...
     max_steps_cap: int = 0         # ... longest episode with steps_ref_cells (0: max_steps)
+    time_scale_min: float = 1.0    # each episode's length (steps_ref_cells) times a factor log-uniform in
+    time_scale_max: float = 1.0    # [time_scale_min, time_scale_max]: missions short of time, as the lab's (18 Oct 2026)
+    obs_time_left: bool = False    # the robots also see the time left, in units of time_ref_s (not only the share gone)
+    time_ref_s: float = 1200.0     # s: the lab mission
     node_by: str = 'time'          # pose-graph nodes per node_ticks ticks of 'time' or of the robot's own 'move'ment
     unc_reward: str = 'removed'    # 'removed': + w_unc x uncertainty loops remove; 'change': - w_unc x its change
     # outcome reward and path revisits (16 Oct 2026; module docstring "Outcome reward"): off = as before
@@ -392,6 +410,9 @@ class EnvConfig:
     # exp(-drift / d_ref); a correction pays the value it restores to the area mapped since (loop: since its old view)
     d_ref: float = 0.10            # m: drift at which mapped area keeps exp(-1) = 37 % of its value
     w_area: float = 0.16           # per m^2 of new area mapped with no drift (0.16: 10 per mean 61.9 m^2 training map)
+    w_teammap: float = 0.0         # > 0: team map value (module docstring); a cell also counts in each merged teammate's
+                                   # map, there with sqrt(d^2 + e^2) (e: that pair's merge error), weighted w_teammap. It
+                                   # replaces the merge unit and the link reward in units of merge error (w_merge)
     drift_rate_max: float = 0.0    # > drift_rate: each episode's drift rate log-uniform in [drift_rate, drift_rate_max]
     far_share: float = 0.0         # share of episodes whose robots start far apart: at least far_frac x the diagonal
     far_frac: float = 0.45         # of the map's free extent (the lab: starts 14.6-17.5 m apart along paths)
@@ -454,6 +475,7 @@ class ExploreEnv:
             self.since_corr = torch.zeros(B, N, device=d)       # m driven since the last loop / link
             self.lost = torch.zeros(B, N, dtype=torch.long, device=d)
             self.links = torch.zeros(B, N, N, device=d)
+            self.merge_d2 = torch.zeros(B, N, N, device=d)      # drift_i^2 + drift_j^2 at the pair's merge
             self.last_link = torch.full((B, N, N), -10 ** 6, dtype=torch.long, device=d)
             self.last_loop = torch.full((B, N), -10 ** 6, dtype=torch.long, device=d)
             self.first_seen = torch.full((B, N, H, W), -1, dtype=torch.int32, device=d)
@@ -517,6 +539,7 @@ class ExploreEnv:
         assert c.reward_mode in ('step', 'outcome', 'map'), c.reward_mode
         self.outcome = c.reward_mode in ('outcome', 'map')
         self.mapval = c.reward_mode == 'map'
+        self.team = self.mapval and c.w_teammap > 0
         self.paths = c.revisit_path
         assert not (self.outcome and not (self.graph and c.event_decisions)), 'outcome needs graph_model, event_decisions'
         assert not (self.paths and not (self.poses and c.pose_revisit and c.event_decisions)), \
@@ -533,6 +556,8 @@ class ExploreEnv:
             self.step_repair = torch.zeros(B, N, device=d)              # value corrections restored (cells x quality)
             self.ep_area = torch.zeros(B, device=d)                     # the mission's area and value (statistics)
             self.ep_value = torch.zeros(B, device=d)
+            self.step_team = torch.zeros(B, N, device=d)                # team map value gained (cells x quality, w_teammap)
+            self.ep_team = torch.zeros(B, device=d)                     # ... over the mission (statistics)
         self.ep_drift_rate = torch.full((B,), c.drift_rate, device=d)   # this episode's drift rate (drift_rate_max)
         self.near_ahead = torch.full((B, N), 99.0, device=d)            # cells to the nearest obstacle in view
         if self.paths:
@@ -646,7 +671,13 @@ class ExploreEnv:
         self.overlap_since[idx] = -1
         self.t[idx] = 0
         if c.steps_ref_cells:          # the episode's length follows the map's free area
-            steps = torch.round(c.max_steps * self.n_target[idx] / c.steps_ref_cells).long()
+            scale = self.n_target[idx] / c.steps_ref_cells
+            if c.time_scale_max > c.time_scale_min:   # ... times this episode's time budget factor
+                lo, hi = math.log(c.time_scale_min), math.log(c.time_scale_max)
+                scale = scale * torch.exp(lo + (hi - lo) * self._rand(k))
+            elif c.time_scale_min != 1.0:
+                scale = scale * c.time_scale_min
+            steps = torch.round(c.max_steps * scale).long()
             self.max_t[idx] = steps.clamp(c.min_steps, self.longest())
         self.ever_success[idx] = False
         self.dist[idx] = 0
@@ -658,7 +689,7 @@ class ExploreEnv:
         self.choices[idx] = 0
         self.goals_set[idx] = 0
         if c.slam_model:
-            for name in ('backlog', 'drift', 'since_corr', 'links', 'step_lost', 'step_links', 'step_drift'):
+            for name in ('backlog', 'drift', 'since_corr', 'links', 'merge_d2', 'step_lost', 'step_links', 'step_drift'):
                 getattr(self, name)[idx] = 0
             self.lost[idx] = 0
             self.manoeuvre[idx] = False
@@ -706,7 +737,8 @@ class ExploreEnv:
                 getattr(self, name)[idx] = 0
             self.opt_fail[idx] = False
         if self.mapval:
-            for name in ('area_log', 'dlog', 'last_corr_tick', 'step_val', 'step_repair', 'ep_area', 'ep_value'):
+            for name in ('area_log', 'dlog', 'last_corr_tick', 'step_val', 'step_repair', 'ep_area', 'ep_value',
+                         'step_team', 'ep_team'):
                 getattr(self, name)[idx] = 0
         if c.drift_rate_max > c.drift_rate:
             lo, hi = math.log(c.drift_rate), math.log(c.drift_rate_max)
@@ -795,7 +827,13 @@ class ExploreEnv:
                 m = m | (torch.einsum('bnk,bkm->bnm', m.float(), m.float()) > 0)
         new = m & ~self.merged
         self.merged = m
-        if self.outcome:          # a new merge: one unit (the error at the merge) for each robot of the pair
+        if self.cfg.slam_model and new.any():        # the drift both maps carry into the alignment
+            d2 = self.drift ** 2
+            self.merge_d2 = torch.where(new, d2[:, :, None] + d2[:, None, :], self.merge_d2)
+        if self.team and new.any():   # each robot's area now also counts in the teammate's map: paid to its owner
+            b, i, j = new.nonzero(as_tuple=True)                                 # i now holds j's map
+            self._pay_team(b, j, self.cfg.w_teammap * self._held(b, j, self._merr(self.links)[b, i, j]))
+        elif self.outcome:        # a new merge: one unit (the error at the merge) for each robot of the pair
             self.step_mgain += new.float().sum(2)
         if self.graph and new.any():
             self._merge_edges(new)
@@ -1021,6 +1059,7 @@ class ExploreEnv:
         if self.mapval:
             self.step_val.zero_()
             self.step_repair.zero_()
+            self.step_team.zero_()
         for _ in range(c.ticks):
             moving, steplen, turn = self._drive()
             if self.mapval:
@@ -1110,6 +1149,9 @@ class ExploreEnv:
                          'done_merge_err': (err * mate).sum((1, 2)) / mate.sum((1, 2)).clamp(min=1)})
         if self.mapval:      # the map's quality: its value per cell (1 = mapped with no drift)
             info['done_quality'] = self.ep_value[done] / self.ep_area[done].clamp(min=1)
+            if self.team:    # the team map's: own maps and (w_teammap) teammates' maps, 1 = all merged, no drift or error
+                full = self.ep_area[done] * (1 + self.cfg.w_teammap * (N - 1))
+                info['done_team_quality'] = (self.ep_value[done] + self.ep_team[done]) / full.clamp(min=1)
         return info
 
     def _outcome_step(self, done, team_before):
@@ -1118,7 +1160,7 @@ class ExploreEnv:
         failed action (no path, too long a trip) is paid its costs only."""
         c, B, N = self.cfg, self.B, self.N
         if self.mapval:      # accuracy-weighted area (m^2 at 0.1 m cells) and the value corrections restored
-            self.opt_pos += c.w_area * 0.01 * (self.step_val + self.step_repair) + c.w_merge * self.step_mgain
+            self.opt_pos += c.w_area * 0.01 * (self.step_val + self.step_repair + self.step_team) + c.w_merge * self.step_mgain
             self.opt_neg -= c.time_cost + c.w_drift * self.step_dadd
         else:
             mine = self.seen_free & self.target[:, None] & ~team_before[:, None]
@@ -1285,7 +1327,21 @@ class ExploreEnv:
         gain = (area * (self._q(new) - self._q(dl))).sum(1)
         self.step_repair.index_put_((b, i), gain, accumulate=True)
         self.ep_value.index_add_(0, b, gain)
+        if self.team:             # ... and to the same area in the teammates' maps that hold it
+            N = self.N
+            e = self._merr(self.links)[b, :, i]                                   # (K, holder)
+            held = (self.merged[b, :, i] & (torch.arange(N, device=self.dev)[None] != i[:, None])).float()
+            qt = lambda x: self._q(torch.sqrt(x[:, None] ** 2 + e[..., None] ** 2))  # noqa: E731
+            self._pay_team(b, i, self.cfg.w_teammap * (area[:, None] * (qt(new) - qt(dl)) * held[..., None]).sum((1, 2)))
         self.dlog[b, i] = new
+
+    def _held(self, b, o, e):
+        """The value (cells x quality) of robot o's mapped area as a teammate holds it with merge error e (K,)."""
+        return (self.area_log[b, o] * self._q(torch.sqrt(self.dlog[b, o] ** 2 + e[:, None] ** 2))).sum(1)
+
+    def _pay_team(self, b, i, v):
+        self.step_team.index_put_((b, i), v, accumulate=True)
+        self.ep_team.index_add_(0, b, v)
 
     def _map_tick(self, team_before):
         """reward_mode 'map': the area each robot mapped this tick that nobody had seen, logged with its drift."""
@@ -1299,6 +1355,12 @@ class ExploreEnv:
         self.step_val += v
         self.ep_area += cells.sum(1)
         self.ep_value += v.sum(1)
+        if self.team:             # the new area in the maps of the teammates that hold this robot's map
+            held = (self.merged & ~torch.eye(N, dtype=torch.bool, device=self.dev)).float()   # (B, holder, owner)
+            q = self._q(torch.sqrt(self.drift[:, None, :] ** 2 + self._merr(self.links) ** 2))
+            vt = self.cfg.w_teammap * cells * (q * held).sum(1)
+            self.step_team += vt
+            self.ep_team += vt.sum(1)
 
     def _kf_loops(self, moving, ok, tick):
         """loop_model 'kf' (EnvConfig): ORB-SLAM3's loop rule. Returns the loops that land now (B, N) and
@@ -1351,23 +1413,31 @@ class ExploreEnv:
                 best_t = torch.where(better, tt, best_t)
         return best_q, best_t
 
-    def _merr(self, links):
-        """Merge error (m) of an alignment with `links` links beyond the merge match."""
+    def _merr(self, links, observed=False):
+        """Merge error (m) of an alignment with `links` links beyond the merge match, (B, N, N). observed: as a
+        robot can know it (from its links only); otherwise also the drift both robots had at the merge, which
+        the robots do not know (the reward and the critic)."""
         c = self.cfg
-        return torch.sqrt(c.merge_floor ** 2 + c.merge_sigma0 ** 2 / (c.merge_n0 + links))
+        drift = 0.0 if observed else c.merge_drift_k * self.merge_d2
+        return torch.sqrt(c.merge_floor ** 2 + c.merge_sigma0 ** 2 / (c.merge_n0 + links) + drift)
+
+    def time_left(self):
+        """(B,) the mission's time left in units of time_ref_s (at most 2)."""
+        c = self.cfg
+        return ((self.max_t - self.t).float() * c.ticks * c.tick_s / c.time_ref_s).clamp(0, 2)
 
     def merge_err0(self):
         """Merge error (m) right after the merge: the unit of the merge features and reward."""
         c = self.cfg
         return math.sqrt(c.merge_floor ** 2 + c.merge_sigma0 ** 2 / c.merge_n0)
 
-    def merge_err(self):
+    def merge_err(self, observed=False):
         """(B, i, j) merge error (m) of robot i's alignment with j: the merge match plus i's links with j."""
-        return self._merr(self.links)
+        return self._merr(self.links, observed)
 
-    def merge_gain(self):
+    def merge_gain(self, observed=False):
         """(B, i, j) merge error one more link would remove, in units of merge_err0()."""
-        return (self._merr(self.links) - self._merr(self.links + 1)) / self.merge_err0()
+        return (self._merr(self.links, observed) - self._merr(self.links + 1, observed)) / self.merge_err0()
 
     def _loop_edges(self, loop, then_tick=None):
         """Loop closures go into each robot's own graph, from its newest node (as of the
@@ -1418,7 +1488,10 @@ class ExploreEnv:
         mine, theirs = i * M + now, j * M + then
         self.step_conn.index_add_(0, b, self._edge_gain(b, i, mine, theirs))
         self.step_merge.index_add_(0, b, self.merge_gain()[b, i, j])
-        if self.outcome:
+        if self.team:             # the value the better alignment restores to j's area in i's map: paid to the finder
+            e0, e1 = self._merr(self.links)[b, i, j], self._merr(self.links + 1)[b, i, j]
+            self._pay_team(b, i, self.cfg.w_teammap * (self._held(b, j, e1) - self._held(b, j, e0)))
+        elif self.outcome:
             self.step_mgain.index_put_((b, i), self.merge_gain()[b, i, j], accumulate=True)
         self.gedge[b, i, mine, theirs] += 1.0
         self.gedge[b, i, theirs, mine] += 1.0
@@ -1570,7 +1643,7 @@ class ExploreEnv:
                     else self.node_at.gather(2, tt[:, 0].long().clamp(0, self.T - 1)).long()[:, None])
             node = node + (torch.arange(N, device=d) * M).view(1, 1, N, 1)
             conn = self.node_gain[:, :, None, :].expand(B, N, N, N * M).gather(3, node.expand(B, N, N, HW))
-            mg = self.merge_gain()                                                    # (B, i, j)
+            mg = self.merge_gain(observed=True)                                       # (B, i, j)
             val = conn / c.conn_cap + mg[..., None]
         else:
             val = torch.ones(B, N, N, HW, device=d)
@@ -1788,7 +1861,7 @@ class ExploreEnv:
             mparts += [(self.links / c.link_cap).clamp(max=1)[..., None] * mf,
                        (self.since_corr[:, None, :, None].expand(B, N, N, 1) / 5.0).clamp(max=2) * mf]
         if self.graph:       # how well my map is aligned with that teammate's (from my links with it)
-            mparts.append((self.merge_err() / self.merge_err0())[..., None] * mf)
+            mparts.append((self.merge_err(observed=True) / self.merge_err0())[..., None] * mf)
         mates = torch.cat(mparts, -1)
         off = ~torch.eye(N, dtype=torch.bool, device=d)
         mates = mates[off[None].expand(B, N, N)].view(B, N, N - 1, mates.shape[-1])
@@ -1808,6 +1881,8 @@ class ExploreEnv:
         slist = [(self.t.float() / self.max_t)[:, None].expand(B, N),
                  ((free | occ).flatten(2).sum(2).float() / (Hs * Ws)).clamp(max=8.0),
                  mate.float().sum(2) / max(1, N - 1), self.has_goal.float()]
+        if c.obs_time_left:  # the time left (s / time_ref_s): the share gone alone does not say how much that is
+            slist.append(self.time_left()[:, None].expand(B, N))
         if c.slam_model:     # what the robot's SLAM node publishes about itself
             slist += [(self.backlog / 3.0).clamp(max=3), (self.lost > 0).float(), (self.lost.float() / c.lost_ticks).clamp(max=1),
                       (self.since_corr / 5.0).clamp(max=2),
@@ -1822,6 +1897,8 @@ class ExploreEnv:
         state = torch.stack([self.occ, self.seen_free.any(1), self.seen_occ.any(1),
                              pos_plane.any(1), goal_plane.any(1)], 1)
         sslist = [self.t.float() / self.max_t, self.team_cov, self.merged.float().mean((1, 2))]
+        if c.obs_time_left:
+            sslist.append(self.time_left())
         if c.slam_model:     # the truth: drift is hidden from the robots
             sslist += [(self.drift.mean(1) / 0.5).clamp(max=4), (self.backlog.amax(1) / 3.0).clamp(max=3),
                        (self.lost > 0).float().mean(1), (self.links.clamp(max=c.link_cap).sum((1, 2))

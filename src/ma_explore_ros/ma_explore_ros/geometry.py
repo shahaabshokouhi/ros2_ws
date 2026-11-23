@@ -1,4 +1,4 @@
-# Copied from ma_explore (2609e08) by ma_explore.robot_package: edit it there, not here.
+# Copied from ma_explore (8ace1a7+changes) by ma_explore.robot_package: edit it there, not here.
 """Batched grid geometry on the GPU: sensing, path distances, frontiers, candidate goals.
 
 Everything works on stacks of maps (first dimension = robot in some

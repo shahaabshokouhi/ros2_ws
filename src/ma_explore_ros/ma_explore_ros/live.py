@@ -1,4 +1,4 @@
-# Copied from ma_explore (2609e08) by ma_explore.robot_package: edit it there, not here.
+# Copied from ma_explore (8ace1a7+changes) by ma_explore.robot_package: edit it there, not here.
 """Decisions from live maps: the bridge between a running robot and the policy.
 
 No ROS here, so it can be tested on its own. A robot's planner (ros_planner.py)
@@ -179,6 +179,7 @@ class Decider:
         self.clear_cells = clear_cells        # cells around each robot that cannot be obstacles (0.2 m)
         self.goal_clearance = goal_clearance  # cells: new goals at least this far from known obstacles (0: off)
         self.escape_cells = escape_cells      # cells around the robot passable unless occupied (a tight spot)
+        self.mission_steps = 0.0              # the mission's length in training steps (obs_time_left; ros_planner)
         cfg = {**env_cfg.__dict__, 'n_agents': n_agents}
         if env_cfg.ego_obs:
             # a mission can be longer than any training episode (the 22 x 16 m lab: 1200 s); the per-episode
@@ -314,7 +315,11 @@ class Decider:
                     a, b = min(int(mine), M - 1), j * M + min(int(theirs), M - 1)
                     e.gedge[0, 0, a, b] += 1.0
                     e.gedge[0, 0, b, a] += 1.0
-        e.t[0] = min(int(t), self.cfg.max_steps - 1)
+        if self.cfg.obs_time_left and self.mission_steps:   # the time left too: the mission's real length
+            e.max_t[0] = max(1, round(self.mission_steps))
+            e.t[0] = min(int(t / self.cfg.max_steps * self.mission_steps), int(e.max_t[0]) - 1)
+        else:
+            e.t[0] = min(int(t), self.cfg.max_steps - 1)
         e.ask[0] = True                       # the planner asks at its events (event decisions): a free choice
         obs = e.observe()
         if self.goal_clearance > 0:
@@ -356,6 +361,12 @@ class Decider:
                                else 'frontier')
         xy_all = win.to_xy(cand)
         offered = [(float(xy_all[k][0]), float(xy_all[k][1]), slot_kind(k)) for k in range(nf, len(cand)) if mask[k]]
+        # the policy's probability of each choice (an RL policy; greedy: it takes the most likely), for the views
+        pr = getattr(self.policy, 'last_probs', None)
+        pr = pr[0, 0].cpu().numpy() if pr is not None else None
+        probs = None if pr is None else {
+            'offered': [float(pr[k]) for k in range(nf, len(cand)) if mask[k]],
+            'keep': float(pr[0]), 'wait': float(pr[1]) if nf == 2 else None, 'chosen': float(pr[a])}
         return {'action': a, 'keep': keep, 'wait': wait, 'kind': kind,
                 'mate': mate if (kind == 'revisit' and mate > 0) else None,
                 'goal': None if (keep or wait) else tuple(win.to_xy(cand[a])),
@@ -369,6 +380,7 @@ class Decider:
                 'front': tuple(win.to_xy(e.cand_front[0, 0, a].cpu().numpy())),
                 'front_gain': float(e.cand_gain[0, 0, a]),
                 'candidates': win.to_xy(cand[mask]), 'n_candidates': int(mask[1:].sum()), 'offered': offered,
+                'probs': probs,
                 'window': win, 'obs': obs, 'ms': 1e3 * (time.perf_counter() - t0)}
 
     def unknown_near(self, robots, xy):

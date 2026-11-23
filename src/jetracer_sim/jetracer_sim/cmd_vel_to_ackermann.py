@@ -12,7 +12,8 @@ car stops 1 s after the last command, like the real driver.
 
 Like the real driver it also publishes the "wheel odometry" /<agent>/odom
 (Nav2 reads the robot's speed there): here, the simulator's true odometry
-from /<agent>/ground_truth/odom, in frames odom -> base_footprint.
+from /<agent>/ground_truth/odom, in frames odom -> base_footprint, stamped on
+arrival (wall-clock time, as the camera images).
 """
 import math
 
@@ -46,6 +47,10 @@ class CmdVelToAckermann(Node):
         self.last = self.get_clock().now()
 
     def on_odom(self, m):
+        # Stamped on arrival, like the real driver: Isaac stamps it in simulation
+        # time, while the camera images carry wall-clock time, and the grid
+        # (wheel pose source, provisional maps) looks odometry up at image times.
+        m.header.stamp = self.get_clock().now().to_msg()
         m.header.frame_id = 'odom'
         m.child_frame_id = 'base_footprint'
         self.odom_pub.publish(m)

@@ -136,6 +136,7 @@ node, plus whatever the flags add.
 | `--teleop` | Single robot: publish a small gray camera view (`/<agent>/orb_slam3/gray`, 320×240, 5 Hz, about 0.35 MB/s) and start the motor driver, so `run_teleop.sh` on the PC can drive the car. |
 | `--nav` | Single robot: grid + Nav2 (car planner and controller) + motor driver; the robot's position comes from SLAM. Goals from RViz. See [§8](#8-how-navigation-works). |
 | `--nav-wheels` | Like `--nav`, but the position comes from wheel odometry, corrected by SLAM. |
+| `--no-bridge` | With `--nav`: after a tracking loss, hold the car until SLAM's new map merges back, instead of carrying on in a provisional map (below, [§8](#8-how-navigation-works)). |
 
 Notes:
 
@@ -359,6 +360,7 @@ What `run_slam.sh` (and, without camera and driver, `run_sim_slam.sh`) runs.
 | `teleop` | `false` | `--teleop`: gray view + motor driver |
 | `nav` | `false` | `--nav`: grid + navigation frames + motor driver + Nav2 |
 | `nav_pose` | `slam` | `slam` or `wheels` (`--nav-wheels`) |
+| `nav_bridge` | `true` | provisional maps after a tracking loss (`--no-bridge`: `false`) |
 | `teleop_driver` | `true` | start the motor driver with teleop/nav (`run_slam.sh` sets `false` when another script already runs one) |
 | `port_name` | `/dev/ttyACM0` | motor board serial port |
 | `camera` | `true` | start the RealSense driver (`false` in simulation) |
@@ -451,6 +453,8 @@ parameters. They are listed in the
 | `orb_slam3/odom` | Odometry | SLAM node | `--grid`/`--nav`: SLAM pose of the rear axle in `map_nav` |
 | `orb_slam3/scan` | LaserScan | SLAM node | `--grid`/`--nav`: live 1 m obstacle scan (frame `camera_floor`) |
 | `orb_slam3/gray` | Image (mono8) | SLAM node | `--teleop` |
+| `orb_slam3/provisional` | Bool (latched) | SLAM node | `--nav`: true while the pose comes from a provisional map |
+| `orb_slam3/test_blind` | Bool | you | test: `true` feeds the SLAM node black frames (a tracking loss on demand) until `false` |
 | `cmd_vel` | Twist | teleop, or Nav2 through the safety gate | → motor driver |
 | `cmd_vel_gate_in` | Twist | Nav2 | `--nav`: Nav2's commands before the safety gate |
 | `odom`, `imu` | Odometry, Imu | motor driver | wheel odometry and IMU |
@@ -551,11 +555,38 @@ Config: `src/orb_slam3/config/nav2_jetracer.yaml`,
 * **Safety gate:** Nav2's commands go through the SLAM node
   (`cmd_vel_gate_in → cmd_vel`). It sends zero while the SLAM pose is more
   than 0.3 s old (tracking lost), because TF would otherwise keep handing out
-  the last pose and Nav2 would drive blind. On a tracking loss it sends a few
-  stops, **cancels the goal** and then stays silent, so the keyboard (not
-  gated) can drive the car back until SLAM relocalizes; then give the goal
-  again. Be quick: without the IMU, ORB-SLAM3 tries to relocalize in the
-  current map for 3 s, then starts a new map that must merge back first.
+  the last pose and Nav2 would drive blind. It sends a few stops and then
+  stays silent, so the keyboard (not gated) can drive the car back. It
+  **cancels the goal** only on a real loss (tracking failed, or SLAM in a
+  temporary map) or once the pose is 1.5 s old; a shorter gap (a busy
+  tracking thread) keeps the goal, and the car drives on when the pose is
+  back. After a cancel, drive it back until SLAM relocalizes, then give the
+  goal again. The gate also stops the car and cancels the goal when the base
+  driver's heartbeat (`/<agent>/base_driver/ok`) says the motor board is gone
+  (cable, board reset); the driver reopens the port every second by itself.
+* **Provisional maps (after a tracking loss):** without the IMU, ORB-SLAM3
+  tries to relocalize in the current map for 3 s, then starts a new map with
+  its own origin. The SLAM node places that new map in the main map by the
+  wheel odometry across the gap (position steps from the wheels, heading from
+  the motor board's IMU, as the jetracer package's EKF does): from the last
+  well-tracked frame before the loss to the new map's first keyframe. Once
+  the new map has 300 map points and has tracked for 1 s, the robot's pose,
+  the grid and Nav2 carry on in `map_nav` as before, with no time or distance
+  limit, and the exploration continues. The new map's scans only fill grid
+  cells the main map has not seen. When ORB-SLAM3 merges the new map into the
+  main map, everything gets its true pose and the log says how far off the
+  odometry placement was (`[nav] provisional map merged … off by … m and …
+  deg`, for both headings). Keyframes of a provisional map are not shared
+  with other robots until then. Not placed (the car is held as before) if
+  the odometry jumped or stopped during the gap (motor board reconnected).
+  Off: `--no-bridge`. Details at the top of `occupancy_mapper.hpp`. Test it
+  without losing tracking for real: `ros2 topic pub --once
+  /AGENT/orb_slam3/test_blind std_msgs/msg/Bool "{data: true}"`, drive a
+  few seconds, then the same with `false`.
+* **Wall margin:** the global costmap inflates obstacles to 0.45 m (cost
+  scaling 3.0), so paths keep away from walls: up close the camera sees a
+  bare surface and tracking is lost. The cost is not lethal beyond the car's
+  outline, so narrow gaps stay passable.
 * **Giving goals:** RViz **2D Goal Pose** (frame `map_nav`), or the
   `/<agent>/navigate_to_pose` action.
 
@@ -781,7 +812,9 @@ not tracked.
 | `Frames didn't arrive within 5 seconds` | `./reset_camera.sh`, wait 4 s, restart. |
 | `frame [map_nav] does not exist` in RViz | Floor not calibrated yet: the camera must see the floor 1–30 cm below it. The node logs why every 5 s (`[grid] still calibrating the floor: …`). On the desk the camera is too high; put it on the floor. |
 | Nav2 prints `Timed out waiting for transform … odom` | Normal for the first seconds (floor calibration). If it persists, check the line above. |
-| Car stops during navigation, log says `[nav] no SLAM pose …` | Tracking lost: the safety gate stopped the car and cancelled the goal. Back it away with teleop until SLAM relocalizes, then give the goal again. |
+| Car stops during navigation, log says `[nav] no SLAM pose …` | The SLAM pose is late. If `… cancelling the Nav2 goal` follows, tracking was lost: it carries on by itself once `[nav] tracking continues in a new SLAM map …` appears (a provisional map). If instead it repeats `… no robot pose for Nav2 yet (…)`, the reason is in the brackets: usually the new map has too few points (camera facing a bare wall or floor): back the car away with teleop. Otherwise (a short delay) it drives on by itself when the pose is back. |
+| `[nav] base driver not responding` / `Motor board … lost` | The motor board's USB serial disappeared (loose cable, board reset). The car is stopped and the goal cancelled; the driver reconnects by itself when the cable is back. |
+| `Error: SLAM of other robots is running on ROS_DOMAIN_ID …` | Another robot runs on this domain. With plain frames both would publish `odom → base_footprint` and Nav2 would mix their poses: start every robot with `--ma-frames` (with `--explore`: and `--team "…"`), or give this robot its own `ROS_DOMAIN_ID`. |
 | A goal does nothing: no blue path, no movement | Nav2 isn't active: `Managed nodes are active` never appeared. Look near the top of the log: `lifecycle_manager: error while loading shared libraries: libdiagnostic_updater.so` → `sudo apt install ros-humble-diagnostic-updater`; `package 'nav2_…' not found` → install Nav2 ([§2](#2-one-time-setup)); endless `Timed out waiting for transform … odom` → floor not calibrated. |
 | The car reacts late to obstacles (the pink cells appear only seconds after the camera sees the object) | The costmaps were dropping the live scan; fixed 2026-10-10 (`min_obstacle_height`), pull. To check: the **Live scan** dots in RViz show the object, and the local costmap should turn pink there within half a second. |
 | `GridBased: failed to create plan, exceeded maximum iterations` | The planner sees no way to the goal: the goal is inside an obstacle, or obstacles close it off. Look at the pink cells in RViz around the car and the goal. (A ring of fake obstacles around the car caused this until 2026-10-10: pull.) |

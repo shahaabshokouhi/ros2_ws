@@ -1,4 +1,4 @@
-# Copied from ma_explore (2609e08) by ma_explore.robot_package: edit it there, not here.
+# Copied from ma_explore (8ace1a7+changes) by ma_explore.robot_package: edit it there, not here.
 """ROS 2 planner for one robot: picks its next exploration goal and sends it to Nav2.
 
     python -m ma_explore.ros_planner --ros-args -p agent:=sim_1 -p agents:="sim_1 sim_2 sim_3" \\
@@ -57,7 +57,10 @@ a row of <out>/<agent>_decisions.csv (kind: keep, stay, wait, revisit, frontier;
 mate: whose pose a revisit goes to) and a JSON message on
 /ma_explore/<agent>/action (latched) for the live view. No SLAM pose for
 pose_timeout s also counts as lost (after a loss ORB-SLAM3 tracks in a
-temporary map: tracking 'OK', but no pose until it is back in the main map);
+temporary map: tracking 'OK', but no pose until it is back in the main map; 1.5 s, when the
+robot's safety gate also gives up the goal -- shorter gaps are a busy tracking thread, and the
+goal is kept). While the base driver's heartbeat (/<agent>/base_driver/ok) is false or stale
+(motor board unplugged, driver dead) it does not decide either (the gate cancels the goal);
 each loss and recovery is a row of <out>/<agent>_slam_events.csv (where, the
 heading, the goal and its bearing, how long).
 Stuck car (unstick, a safety layer that does not change the policy): when
@@ -190,7 +193,7 @@ class Planner(Node):
         self.wait_s = p('wait_s', 5.4)            # one training decision: 8 ticks x 0.67 s
         # no SLAM pose for this long = tracking lost (after a loss ORB-SLAM3 tracks in a temporary
         # map: its tracking state says OK but no pose comes until it is back in the main map)
-        self.pose_timeout = p('pose_timeout', 1.0)
+        self.pose_timeout = p('pose_timeout', 1.5)   # = the safety gate's cancel delay (occupancy_mapper.hpp)
         self.enabled = p('start_enabled', True)   # /ma_explore/<agent>/enable (Bool) switches it
         # mission length (s): the policy's time input is the share of the mission gone, as in training
         # (t / max_steps); 0: the number of decisions taken (policies trained to stop at a coverage goal)
@@ -200,7 +203,7 @@ class Planner(Node):
         self.rec_on = p('recovery', True)
         self.rec_wait = p('recovery_wait', 2.0)          # s to wait first (SLAM may relocalize by itself)
         self.rec_back = p('recovery_back_m', 0.8)        # m backed up per attempt
-        self.rec_speed = p('recovery_speed', 0.1)        # m/s
+        self.rec_speed = p('recovery_speed', 0.2)        # m/s (0.1 barely moved the real car, 21 November)
         self.rec_tries = p('recovery_attempts', 2)
         # straight: reverse straight back (wheel odometry measures the distance; timed without it): the
         # usual loss is an obstacle suddenly filling the camera (real robot, 13 October). path: follow
@@ -260,6 +263,8 @@ class Planner(Node):
         learned = policy.startswith('rl:') or policy.endswith('.pt')     # on the robots: a plain policy file
         gc = (0.0 if learned else 0.25) if gc < 0 else gc
         self.decider = Decider(pol, env_cfg, self.team, H, device, goal_clearance=math.ceil(round(gc / 0.1, 6)))
+        if self.mission_s > 0:                 # obs_time_left: the time left in the mission, in training steps
+            self.decider.mission_steps = self.mission_s / (env_cfg.ticks * env_cfg.tick_s)
         if self.decide_on == 'auto':
             self.decide_on = 'events' if env_cfg.event_decisions else 'distance'
         assert self.decide_on in ('events', 'distance'), self.decide_on
@@ -318,6 +323,10 @@ class Planner(Node):
         self.known_pub = self.create_publisher(OccupancyGrid, f'/ma_explore/{self.me}/known_map', latched)
         self.create_subscription(Bool, f'/ma_explore/{self.me}/enable', self.on_enable, latched)
         self.create_subscription(Odometry, f'/{self.me}/odom', self.on_wheel, 20)     # the base driver's wheel odometry
+        self.driver = None            # (ok, monotonic time) of the base driver's heartbeat; None: never seen (sim)
+        self.driver_down = False
+        self.create_subscription(Bool, f'/{self.me}/base_driver/ok',
+                                 lambda m: setattr(self, 'driver', (bool(m.data), time.monotonic())), 10)
         self.create_subscription(LaserScan, f'/{self.me}/orb_slam3/scan', self.on_scan,      # the depth scan (escape;
                                  qos_profile_sensor_data)                               # published best effort)
         self.cmd_pub = self.create_publisher(Twist, f'/{self.me}/cmd_vel', 10)      # direct, as the keyboard teleop
@@ -594,6 +603,21 @@ class Planner(Node):
                 self.goal_seq += 1
                 self.goal_handle.cancel_goal_async()
             self.get_logger().warn(f'{self.me}: recovery test: acting as if tracking were lost')
+        # The driver's flag already says whether the board is sending (0.5 s); the heartbeat itself counts
+        # as missing (driver dead) only after 2 s: a policy step (~0.6 s on the Jetson) blocks this node's
+        # callbacks, and a 0.5 s limit then raised a false alarm after nearly every decision (21 November).
+        if self.driver is not None and (not self.driver[0] or now - self.driver[1] > 2.0):
+            if not self.driver_down:              # the safety gate has stopped the car and cancelled the goal
+                self.driver_down = True
+                self.get_logger().error(f'{self.me}: base driver not responding (motor board unplugged?): '
+                                        'not deciding until it is back')
+            return
+        if self.driver_down:
+            self.driver_down = False
+            self.get_logger().info(f'{self.me}: base driver is back')
+            self.goal, self.goal_yaw, self.paused_until, self.next_ok = None, None, None, now
+            self.end_path()
+            self.publish_goal()
         if self.is_lost(now):
             if self.lost_since is None:           # the safety gate has stopped the car and cancelled the goal
                 self.lost_since = now
@@ -765,7 +789,7 @@ class Planner(Node):
             'links': {a: self.links.get(a, 0) for a in merged}, 'backlog': round(float(self.backlog()), 2),
             'since_corr': round(float(self.metrics[10]), 2), 'pose': [float(x), float(y), float(yaw)],
             'mates': {a: [float(v) for v in r.pose] for a, r in zip(self.others, robots[1:]) if r.known},
-            'offered': res.get('offered', [])})))
+            'offered': res.get('offered', []), 'probs': res.get('probs')})))
 
     def is_lost(self, now):
         return (self.test_lost or self.tracking != TRACKING_OK

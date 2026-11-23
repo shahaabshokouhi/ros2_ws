@@ -1,4 +1,4 @@
-checkpoint /home/shahab/result/ma_explore/runs/20261015_215848_map5m/checkpoints/best.pt
-update 950, 2.92 M steps
-ma_explore 54c9613+changes
-copied 2026-10-16T06:41:53-04:00
+checkpoint /home/shahab/result/ma_explore/runs/20261018_162345_teammap/checkpoints/best.pt
+update 1350, 4.15 M steps
+ma_explore 8ace1a7+changes
+copied 2026-10-19T04:18:06-04:00

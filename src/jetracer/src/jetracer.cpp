@@ -1,10 +1,13 @@
 /*
  * ROS2 C++ node bridging serial communication with JetRacer controller.
  */
+#include <atomic>
 #include <chrono>
 #include <iostream>
+#include <mutex>
 #include <thread>
 #include <vector>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
@@ -13,6 +16,7 @@
 #include <geometry_msgs/msg/twist.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/int32.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -46,21 +50,14 @@ public:
     agent_name_ = this->declare_parameter("agent_name", "agent_0");
 
     // Open serial port
-    try {
-      serial_.open(port_name_);
-      serial_.set_option(boost::asio::serial_port_base::baud_rate(115200));
-      serial_.set_option(boost::asio::serial_port_base::character_size(8));
-      serial_.set_option(boost::asio::serial_port_base::parity(
-        boost::asio::serial_port_base::parity::none));
-      serial_.set_option(boost::asio::serial_port_base::stop_bits(
-        boost::asio::serial_port_base::stop_bits::one));
-      serial_.set_option(boost::asio::serial_port_base::flow_control(
-        boost::asio::serial_port_base::flow_control::none));
-    } catch(const std::exception &e) {
-      RCLCPP_ERROR(this->get_logger(), "Failed to open %s: %s", port_name_.c_str(), e.what());
+    std::string err;
+    if (!openPort(err)) {
+      RCLCPP_ERROR(this->get_logger(), "Failed to open %s: %s", port_name_.c_str(), err.c_str());
       rclcpp::shutdown();
       return;
     }
+    port_ok_ = true;
+    last_rx_ = std::chrono::steady_clock::now();
 
     // Publishers & TF
     imu_pub_  = this->create_publisher<sensor_msgs::msg::Imu>(agent_name_ + "/imu", 10);
@@ -70,6 +67,15 @@ public:
     lset_pub_ = this->create_publisher<std_msgs::msg::Int32>(agent_name_ + "/motor/lset", 10);
     rset_pub_ = this->create_publisher<std_msgs::msg::Int32>(agent_name_ + "/motor/rset", 10);
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
+    // Heartbeat at 10 Hz: true while the port is open and the board is sending.
+    // The SLAM node's safety gate and the exploration planner stop when it is
+    // false or stops coming (this process died).
+    ok_pub_ = this->create_publisher<std_msgs::msg::Bool>(agent_name_ + "/base_driver/ok", 10);
+    ok_timer_ = this->create_wall_timer(100ms, [this] {
+      std_msgs::msg::Bool m;
+      m.data = port_ok_ && std::chrono::steady_clock::now() - last_rx_.load() < 500ms;
+      ok_pub_->publish(m);
+    });
 
     // cmd_vel subscriber
     cmd_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
@@ -88,13 +94,92 @@ public:
     last_cmd_time_ = this->now();
   }
 
+  ~JetracerBridge() override {
+    running_ = false;                       // the reader polls with a timeout and exits
+    if (reader_thread_.joinable()) reader_thread_.join();
+    std::lock_guard<std::mutex> lk(serial_mx_);
+    if (port_ok_) {                         // a last stop command
+      x_ = y_ = yaw_ = 0.0;
+      writeVelocity();
+    }
+    boost::system::error_code ec;
+    serial_.close(ec);
+  }
+
 private:
+  bool openPort(std::string &err) {
+    try {
+      serial_.open(port_name_);
+      serial_.set_option(boost::asio::serial_port_base::baud_rate(115200));
+      serial_.set_option(boost::asio::serial_port_base::character_size(8));
+      serial_.set_option(boost::asio::serial_port_base::parity(
+        boost::asio::serial_port_base::parity::none));
+      serial_.set_option(boost::asio::serial_port_base::stop_bits(
+        boost::asio::serial_port_base::stop_bits::one));
+      serial_.set_option(boost::asio::serial_port_base::flow_control(
+        boost::asio::serial_port_base::flow_control::none));
+      return true;
+    } catch(const std::exception &e) {
+      err = e.what();
+      boost::system::error_code ec;
+      serial_.close(ec);
+      return false;
+    }
+  }
+
+  // The port failed (cable pulled, board reset): close it and reopen it every
+  // second until the device is back. Called by the reader thread only.
+  void reconnect() {
+    RCLCPP_ERROR(get_logger(), "Motor board on %s lost: stopped; reopening it every second",
+                 port_name_.c_str());
+    {
+      std::lock_guard<std::mutex> lk(serial_mx_);
+      boost::system::error_code ec;
+      serial_.close(ec);
+    }
+    while (running_ && rclcpp::ok()) {
+      std::this_thread::sleep_for(1s);
+      std::lock_guard<std::mutex> lk(serial_mx_);
+      std::string err;
+      if (openPort(err)) {
+        x_ = y_ = yaw_ = 0.0;               // no old command after the gap
+        last_rx_ = std::chrono::steady_clock::now();
+        port_ok_ = true;
+        RCLCPP_WARN(get_logger(), "Motor board on %s is back", port_name_.c_str());
+        return;
+      }
+    }
+  }
+
+  // Read exactly n bytes; false on a port error or at shutdown.
+  bool readExact(uint8_t *buf, size_t n) {
+    size_t got = 0;
+    while (got < n) {
+      if (!running_ || !rclcpp::ok() || !port_ok_) return false;   // port_ok_: a write failed
+      pollfd pfd{serial_.native_handle(), POLLIN, 0};
+      const int r = ::poll(&pfd, 1, 200);
+      if (r == 0) continue;                 // timeout: check running_ again
+      if (r < 0 || (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+        port_ok_ = false;
+        return false;
+      }
+      boost::system::error_code ec;
+      got += serial_.read_some(boost::asio::buffer(buf + got, n - got), ec);
+      if (ec) {
+        port_ok_ = false;
+        return false;
+      }
+    }
+    return true;
+  }
+
    // In your class definition, under “Members”:
   bool odom_initialized_{false};
   double odom_offset_x_{0.0}, odom_offset_y_{0.0}, odom_offset_yaw_{0.0};
   
   // callback for cmd_vel
   void cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg) {
+    std::lock_guard<std::mutex> lk(serial_mx_);
     x_ = msg->linear.x;
     y_ = msg->linear.y;
     yaw_ = msg->angular.z;
@@ -104,9 +189,15 @@ private:
   // send velocity periodically
   void sendVelocity() {
     rclcpp::Time tnow = this->now();
+    std::lock_guard<std::mutex> lk(serial_mx_);
     if ((tnow - last_cmd_time_).seconds() > 1.0) {
       x_ = y_ = yaw_ = 0.0;
     }
+    if (port_ok_) writeVelocity();
+  }
+
+  // Caller holds serial_mx_.
+  void writeVelocity() {
     uint8_t buf[11];
     buf[0] = HEAD1; buf[1] = HEAD2; buf[2] = 0x0B; buf[3] = TYPE_VELOCITY;
     int16_t xi = static_cast<int16_t>(x_ * 1000);
@@ -116,29 +207,40 @@ private:
     int16_t yw = static_cast<int16_t>(yaw_ * 1000);
     buf[8] = (yw >> 8) & 0xFF; buf[9] = yw & 0xFF;
     buf[10] = checksum(buf, 10);
-    boost::asio::write(serial_, boost::asio::buffer(buf, 11));
+    boost::system::error_code ec;
+    boost::asio::write(serial_, boost::asio::buffer(buf, 11), ec);
+    if (ec) {                               // e.g. "No such device": the reader reconnects
+      RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000, "Motor board write failed: %s",
+                            ec.message().c_str());
+      port_ok_ = false;
+    }
   }
 
   // continuous serial reader
   void serialReadLoop() {
     std::vector<uint8_t> packet;
-    while (rclcpp::ok()) {
+    while (running_ && rclcpp::ok()) {
+      if (!port_ok_) {
+        reconnect();
+        continue;
+      }
       uint8_t byte;
-      boost::asio::read(serial_, boost::asio::buffer(&byte, 1));
+      if (!readExact(&byte, 1)) continue;
       if (byte != HEAD1) continue;
-      boost::asio::read(serial_, boost::asio::buffer(&byte, 1));
+      if (!readExact(&byte, 1)) continue;
       if (byte != HEAD2) continue;
 
       // size
-      boost::asio::read(serial_, boost::asio::buffer(&byte, 1));
+      if (!readExact(&byte, 1)) continue;
       size_t sz = byte;
+      if (sz < 42) continue;                // handlePacket reads up to byte 41 (also: noise after a reconnect)
       packet.resize(sz);
       packet[0] = HEAD1;
       packet[1] = HEAD2;
       packet[2] = static_cast<uint8_t>(sz);
 
       // rest of packet
-      boost::asio::read(serial_, boost::asio::buffer(packet.data()+3, sz-3));
+      if (!readExact(packet.data()+3, sz-3)) continue;
 
       // checksum
       if (checksum(packet.data(), sz-1) != packet[sz-1]) {
@@ -146,6 +248,7 @@ private:
         continue;
       }
 
+      last_rx_ = std::chrono::steady_clock::now();
       handlePacket(packet);
     }
   }
@@ -238,7 +341,11 @@ private:
   bool publish_tf_;
   std::string agent_name_;
 
-  double x_{0}, y_{0}, yaw_{0};
+  double x_{0}, y_{0}, yaw_{0};            // guarded by serial_mx_ (written by cmdVelCallback too)
+  std::mutex serial_mx_;                    // writes, close and reopen (the reader thread reads without it)
+  std::atomic<bool> port_ok_{false};
+  std::atomic<bool> running_{true};
+  std::atomic<std::chrono::steady_clock::time_point> last_rx_{std::chrono::steady_clock::time_point{}};
   rclcpp::Time last_cmd_time_;
 
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
@@ -247,6 +354,8 @@ private:
   std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_sub_;
   rclcpp::TimerBase::SharedPtr vel_timer_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr ok_pub_;
+  rclcpp::TimerBase::SharedPtr ok_timer_;
   std::thread reader_thread_;
 };
 

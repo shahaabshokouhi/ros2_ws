@@ -114,8 +114,18 @@ public:
                 publish_mappoints = false;
                 publish_single_mappoint = false;
             }
-            const std::string color_topic = std::string("/") + agent_name_ + std::string("/camera/realsense2_camera/color/image_raw");
-            const std::string depth_topic = std::string("/") + agent_name_ + std::string("/camera/realsense2_camera/depth/image_rect_raw");
+            // sensor: "rgbd" (default: the robots, Isaac) or "stereo" (rectified
+            // stereo pairs, e.g. KITTI replays). Stereo takes the left image on
+            // /<agent>/stereo/left/image_raw and the right on .../right/image_raw;
+            // they go through the same synchronizer as color + depth.
+            const std::string sensor = this->declare_parameter<std::string>("sensor", "rgbd");
+            stereo_ = (sensor == "stereo");
+            if (!stereo_ && sensor != "rgbd")
+                throw std::runtime_error("sensor must be 'rgbd' or 'stereo', got '" + sensor + "'");
+            const std::string color_topic = std::string("/") + agent_name_ + (stereo_
+                ? std::string("/stereo/left/image_raw") : std::string("/camera/realsense2_camera/color/image_raw"));
+            const std::string depth_topic = std::string("/") + agent_name_ + (stereo_
+                ? std::string("/stereo/right/image_raw") : std::string("/camera/realsense2_camera/depth/image_rect_raw"));
             const std::string imu_topic   = std::string("/") + agent_name_ + std::string("/camera/realsense2_camera/imu");
 
             // --- RGBD-Inertial vs plain RGBD -----------------------------------
@@ -138,17 +148,21 @@ public:
             else if (use_imu_param == "false") use_imu_ = false;
             else /* auto */                    use_imu_ = settings_have_imu;
 
+            if (stereo_ && use_imu_) {
+                RCLCPP_WARN(this->get_logger(), "use_imu is not supported with sensor:=stereo; running plain stereo.");
+                use_imu_ = false;
+            }
             if (use_imu_param == "true" && !settings_have_imu)
                 RCLCPP_WARN(this->get_logger(),
                     "use_imu:=true but settings '%s' has no IMU.T_b_c1 calibration; "
                     "falling back to plain RGBD.", settings_file.c_str());
             RCLCPP_INFO(this->get_logger(), "SLAM sensor mode: %s",
-                        use_imu_ ? "RGBD-Inertial (IMU_RGBD)" : "RGBD");
+                        stereo_ ? "Stereo" : use_imu_ ? "RGBD-Inertial (IMU_RGBD)" : "RGBD");
 
             slam_ = std::make_unique<ORB_SLAM3::System>(
                 vocab_file,
                 settings_file,
-                use_imu_ ? ORB_SLAM3::System::IMU_RGBD : ORB_SLAM3::System::RGBD,
+                stereo_ ? ORB_SLAM3::System::STEREO : use_imu_ ? ORB_SLAM3::System::IMU_RGBD : ORB_SLAM3::System::RGBD,
                 /*bUseViewer=*/false,
                 /*initFr=*/0,
                 /*strSequence=*/std::string(),
@@ -235,8 +249,12 @@ public:
                 "orb_slam3/owner_update", qos);
             back_obs_pub_ = this->create_publisher<orbslam3_msgs::msg::BackObservations>(
                 "orb_slam3/back_observations", qos);
-            path_pub_ = this->create_publisher<nav_msgs::msg::Path>(
-                agent_name_ + "/orb_slam3/path", 10);
+            // The whole trajectory, republished every frame: for RViz on one
+            // robot only. With prefixed frames (several robots) it is neither
+            // kept nor published -- it grows without bound and nothing uses it.
+            if (frame_prefix_.empty())
+                path_pub_ = this->create_publisher<nav_msgs::msg::Path>(
+                    agent_name_ + "/orb_slam3/path", 10);
             // image_plane_pub_ disabled — image-plane point-cloud publishing
             // was commented out (user request). Re-enable by uncommenting both
             // this and the image_plane_pub_ member + publish block in syncCallback.
@@ -312,6 +330,17 @@ public:
             sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(10), color_sub_, depth_sub_);
             sync_->registerCallback(std::bind(&ORBSLAM3Node::syncCallback, this, std::placeholders::_1, std::placeholders::_2));
 
+            // Test switch: true on /<agent>/orb_slam3/test_blind feeds black
+            // frames (no features, no depth) until false -- a tracking loss on
+            // demand, to test what follows it (simulation or robot).
+            blind_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+                agent_name_ + "/orb_slam3/test_blind", 10,
+                [this](std_msgs::msg::Bool::ConstSharedPtr m) {
+                    if (m->data != test_blind_.exchange(m->data))
+                        RCLCPP_WARN(this->get_logger(), "[test] camera %s",
+                                    m->data ? "BLINDED (black frames, no depth)" : "back");
+                });
+
             // IMU stream (RGBD-Inertial only). SensorDataQoS gives a deep,
             // best-effort queue so 200 Hz samples are not dropped while the
             // tracking thread is busy. Buffered here (default callback group /
@@ -370,6 +399,7 @@ private:
         cv::Mat depth_normalized;
         cv::Mat depth_raw16;   // original 16UC1 depth in millimeters (for saving)
         cv::Mat bgr_image;
+        cv::Mat right_image;   // stereo: the right image arrives in depth_msg
         std::vector<ORB_SLAM3::MapPoint*> vpHighQualityMapPoints;
 
         // Process color image
@@ -384,7 +414,15 @@ private:
 
         // Process depth image: 16UC1 millimetres from the RealSense, or 32FC1
         // metres (e.g. Isaac Sim through jetracer_sim); invalid depth -> 0.
-        try {
+        // Stereo: the second image is the right camera's, converted like the left.
+        if (stereo_) {
+            try {
+                auto cv_ptr = cv_bridge::toCvShare(depth_msg, sensor_msgs::image_encodings::RGB8);
+                cv::cvtColor(cv_ptr->image, right_image, cv::COLOR_RGB2BGR);
+            } catch (cv_bridge::Exception& e) {
+                RCLCPP_ERROR(this->get_logger(), "cv_bridge exception (right): %s", e.what());
+            }
+        } else try {
             if (depth_msg->encoding == sensor_msgs::image_encodings::TYPE_32FC1) {
                 auto cv_ptr = cv_bridge::toCvShare(depth_msg);
                 depth_normalized = cv_ptr->image.clone();
@@ -402,6 +440,12 @@ private:
             RCLCPP_ERROR(this->get_logger(), "cv_bridge exception (depth): %s", e.what());
         }
 
+        if (test_blind_.load()) {          // test switch (see blind_sub_)
+            if (!bgr_image.empty()) bgr_image = cv::Mat::zeros(bgr_image.size(), bgr_image.type());
+            if (!stereo_ && !depth_normalized.empty())
+                depth_normalized = cv::Mat::zeros(depth_normalized.size(), depth_normalized.type());
+        }
+
         double timestamp = rclcpp::Time(color_msg->header.stamp).seconds();
 
         // Process images with ORB-SLAM3
@@ -409,8 +453,10 @@ private:
         bool trackingOk = false;
         if (slam_) {
 
-            if (bgr_image.empty() || depth_normalized.empty()) {
-                RCLCPP_WARN_ONCE(this->get_logger(), "Skipping frame: empty color or depth image");
+            const cv::Mat& second = stereo_ ? right_image : depth_normalized;
+            if (bgr_image.empty() || second.empty()) {
+                RCLCPP_WARN_ONCE(this->get_logger(), "Skipping frame: empty %s image",
+                                 stereo_ ? "left or right" : "color or depth");
                 return;
             }
 
@@ -427,17 +473,20 @@ private:
                     bgr_image.cols, bgr_image.rows, expected_width_, expected_height_);
                 return;
             }
-            if (depth_normalized.cols != bgr_image.cols || depth_normalized.rows != bgr_image.rows) {
+            if (second.cols != bgr_image.cols || second.rows != bgr_image.rows) {
                 RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                    "Depth resolution %dx%d does not match color %dx%d — is the aligned "
-                    "depth topic being remapped correctly? Dropping frames.",
-                    depth_normalized.cols, depth_normalized.rows, bgr_image.cols, bgr_image.rows);
+                    "%s resolution %dx%d does not match %s %dx%d — is the %s topic being "
+                    "remapped correctly? Dropping frames.", stereo_ ? "Right" : "Depth",
+                    second.cols, second.rows, stereo_ ? "left" : "color", bgr_image.cols, bgr_image.rows,
+                    stereo_ ? "right" : "aligned depth");
                 return;
             }
 
             try {
                 const auto t0 = std::chrono::steady_clock::now();
-                if (use_imu_) {
+                if (stereo_) {
+                    Tcw = slam_->TrackStereo(bgr_image, right_image, timestamp);
+                } else if (use_imu_) {
                     // IMU samples accumulated since the previous frame.
                     std::vector<ORB_SLAM3::IMU::Point> vImuMeas = drainImuUpTo(timestamp);
                     Tcw = slam_->TrackRGBD(bgr_image, depth_normalized, timestamp, vImuMeas);
@@ -511,7 +560,6 @@ private:
 
             geometry_msgs::msg::PoseStamped pose_msg;
             pose_msg.header.stamp = color_msg->header.stamp;
-            path_msg_.header.stamp = color_msg->header.stamp;
             pose_msg.header.frame_id = map_frame_;
             pose_msg.pose.position.x = tx;
             pose_msg.pose.position.y = ty;
@@ -521,7 +569,10 @@ private:
             pose_msg.pose.orientation.z = q_map_cam.z();
             pose_msg.pose.orientation.w = q_map_cam.w();
 
-            path_msg_.poses.push_back(pose_msg);
+            if (path_pub_) {
+                path_msg_.header.stamp = color_msg->header.stamp;
+                path_msg_.poses.push_back(pose_msg);
+            }
             pose_pub_->publish(pose_msg);
 
             geometry_msgs::msg::TransformStamped tf_stamped;
@@ -618,7 +669,7 @@ private:
         }
 
         // Publish the path
-        path_pub_->publish(path_msg_);
+        if (path_pub_) path_pub_->publish(path_msg_);
 
         // Publish SLAM-internal metrics for the scheduler.
         // Indices: 0=track_ms, 1=tracking_state, 2=map_points,
@@ -1805,7 +1856,8 @@ private:
     rclcpp::Publisher<orbslam3_msgs::msg::MapPoint>::SharedPtr single_mappoint_pub_;
 
     message_filters::Subscriber<sensor_msgs::msg::Image> color_sub_;
-    message_filters::Subscriber<sensor_msgs::msg::Image> depth_sub_;
+    message_filters::Subscriber<sensor_msgs::msg::Image> depth_sub_;   // stereo: the right image
+    bool stereo_ = false;
     rclcpp::Subscription<orbslam3_msgs::msg::MapPoint>::SharedPtr mappoint_sub_;
     rclcpp::Subscription<orbslam3_msgs::msg::MapPointArray>::SharedPtr mappoint_array_sub_;
     rclcpp::Publisher<orbslam3_msgs::msg::KeyFrameBoW>::SharedPtr kf_bow_pub_;
@@ -1866,6 +1918,8 @@ private:
     std::queue<SaveJob> save_queue_;
     std::mutex save_queue_mtx_;
     std::condition_variable save_queue_cv_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr blind_sub_;
+    std::atomic<bool> test_blind_{false};
     std::atomic<bool> save_worker_stop_{false};
     std::thread save_worker_;
     size_t kSaveQueueMax = 64;

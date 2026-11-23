@@ -1,4 +1,4 @@
-# Copied from ma_explore (2609e08) by ma_explore.robot_package: edit it there, not here.
+# Copied from ma_explore (8ace1a7+changes) by ma_explore.robot_package: edit it there, not here.
 """Back-tracking after a SLAM tracking loss, and the way out of a wedge (pure geometry, no ROS).
 
 When tracking is lost the car drives back, slowly and in reverse, along the
