@@ -32,6 +32,11 @@ drops the other robots' messages.
 11. [Packages and files](#11-packages-and-files)
 12. [Troubleshooting](#12-troubleshooting)
 
+For the real three-robot Vicon test in `~/robot_test_manual.pdf`, see
+[`docs/real_robot_test_vicon.md`](docs/real_robot_test_vicon.md) and use
+`./record_robot_test.sh` on the base station to include Vicon ground truth in
+the run's result bag.
+
 ---
 
 ## 1. What do I run? (recipes)
