@@ -64,8 +64,8 @@ goal is kept). While the base driver's heartbeat (/<agent>/base_driver/ok) is fa
 each loss and recovery is a row of <out>/<agent>_slam_events.csv (where, the
 heading, the goal and its bearing, how long).
 Stuck car (unstick, a safety layer that does not change the policy): when
-`unstick_aborts` goals fail (aborted, or no progress) within `unstick_window` s while the car moved
-less than `unstick_move` m, Nav2's costmaps hold obstacles all around it -- in
+the last `unstick_aborts` goals fail (aborted, or no progress) within `unstick_window` s, all within
+`unstick_move` m of where the car is, Nav2's costmaps hold obstacles all around it -- in
 Isaac, teammates that drove close by stay marked beside and behind a car after
 they have left, because a mark is erased only when the forward camera sees the
 spot free again, and the car's Nav2 recoveries never clear the costmaps. Then:
@@ -324,6 +324,10 @@ class Planner(Node):
         self.create_subscription(Bool, f'/ma_explore/{self.me}/enable', self.on_enable, latched)
         self.create_subscription(Odometry, f'/{self.me}/odom', self.on_wheel, 20)     # the base driver's wheel odometry
         self.driver = None            # (ok, monotonic time) of the base driver's heartbeat; None: never seen (sim)
+        # the launch started the base driver: its heartbeat must come (lab, 23 Nov: a missing motor board
+        # ended the driver at once, and the planner kept sending goals to a car that could not move)
+        self.expect_driver = p('expect_driver', False)
+        self.node_start = time.monotonic()
         self.driver_down = False
         self.create_subscription(Bool, f'/{self.me}/base_driver/ok',
                                  lambda m: setattr(self, 'driver', (bool(m.data), time.monotonic())), 10)
@@ -606,11 +610,14 @@ class Planner(Node):
         # The driver's flag already says whether the board is sending (0.5 s); the heartbeat itself counts
         # as missing (driver dead) only after 2 s: a policy step (~0.6 s on the Jetson) blocks this node's
         # callbacks, and a 0.5 s limit then raised a false alarm after nearly every decision (21 November).
-        if self.driver is not None and (not self.driver[0] or now - self.driver[1] > 2.0):
+        never = self.driver is None and self.expect_driver and now - self.node_start > 5.0
+        if never or (self.driver is not None and (not self.driver[0] or now - self.driver[1] > 2.0)):
             if not self.driver_down:              # the safety gate has stopped the car and cancelled the goal
                 self.driver_down = True
-                self.get_logger().error(f'{self.me}: base driver not responding (motor board unplugged?): '
-                                        'not deciding until it is back')
+                self.get_logger().error(
+                    f'{self.me}: NO BASE DRIVER: no heartbeat since the start (the jetracer driver is not running)'
+                    if never else f'{self.me}: base driver not responding (motor board unplugged?)')
+                self.get_logger().error(f'{self.me}: not deciding until the base driver is back')
             return
         if self.driver_down:
             self.driver_down = False
@@ -1084,8 +1091,13 @@ class Planner(Node):
             self.aborts.append((now, xy))
             while self.aborts and now - self.aborts[0][0] > self.unstick_window:
                 self.aborts.popleft()
-            if (len(self.aborts) >= self.unstick_aborts
-                    and all(math.dist(a[1], xy) < self.unstick_move for a in self.aborts)):
+            # the last N failures, not all in the window: an older failure elsewhere (before a back-up)
+            # kept the car "moving" while 6 goals failed at one spot (lab, 23 Nov)
+            last = list(self.aborts)[-self.unstick_aborts:]
+            if (len(last) >= self.unstick_aborts
+                    and all(math.dist(a[1], xy) < self.unstick_move for a in last)):
+                while len(self.aborts) > self.unstick_aborts:   # unstuck() reports these
+                    self.aborts.popleft()
                 self.unstuck(now)
 
     # ── stuck car: costmaps walled in (module docstring) ──────────────────

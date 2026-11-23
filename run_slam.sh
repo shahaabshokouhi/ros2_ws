@@ -302,6 +302,10 @@ if [ "$RECORD" != "true" ]; then
 fi
 
 # ── Run record (see the header) ─────────────────────────────────────────
+# Piped into tee (./run_slam.sh ... | tee log): Ctrl-C ends tee too, and the next echo into the
+# closed pipe used to kill this script before it packed the record (lab, 23 Nov). Ignore SIGPIPE,
+# and say the stop messages on stderr, which still reaches the terminal.
+trap '' PIPE
 WS_DIR="$(cd "$(dirname "$0")" && pwd)"
 RUN_NAME="$(date +%Y%m%d_%H%M%S)_${AGENT_NAME}"
 RUNS_DIR="${RESULT_DIR:-$HOME/result}/runs"
@@ -337,10 +341,17 @@ for repo in "ros2_ws:$WS_DIR" "ORB_SLAM3:$ORB_SLAM3_ROOT"; do
     git -C "${repo#*:}" diff HEAD > "$RUN_DIR/${repo%%:*}.patch" 2>/dev/null
     [ -s "$RUN_DIR/${repo%%:*}.patch" ] || rm -f "$RUN_DIR/${repo%%:*}.patch"
 done
+FREE_MB=$(df -Pm "$RUNS_DIR" | awk 'NR==2 {print $4}')
+if [ -n "$FREE_MB" ] && [ "$FREE_MB" -lt 2048 ]; then
+    echo "WARNING: only $FREE_MB MB free on the disk of $RUNS_DIR (a run records ~10 MB a minute);" \
+         "delete old runs in $RUNS_DIR or ~/result" >&2
+fi
 export MA_NEW_EVAL_DIR="$RUN_DIR/eval"
 export ROS_LOG_DIR="$RUN_DIR/ros_log"
 
-# The small topics (no images, no point clouds). zstd per message: the grid maps shrink ~20x.
+# The small topics (no images, no point clouds). Not compressed while recording: per-message zstd
+# could not keep up on the Jetson and dropped 19% of the messages (IMU, motors; lab, 23 Nov). The
+# .tgz at the end compresses the bag (the grid maps shrink ~20x).
 A="/$AGENT_NAME"
 BAG_TOPICS=(
     $A/orb_slam3/odom $A/orb_slam3/pose $A/orb_slam3/slam_metrics $A/orb_slam3/provisional
@@ -353,21 +364,14 @@ BAG_TOPICS=(
 # A script's background commands start with Ctrl-C ignored, and the recorder would then not close
 # its bag on our kill -INT below: give it back the default handling first.
 DFL_INT='import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])'
-python3 -c "$DFL_INT" ros2 bag record -o "$RUN_DIR/bag" --compression-mode message --compression-format zstd \
-    "${BAG_TOPICS[@]}" > "$RUN_DIR/bag.log" 2>&1 &
+python3 -c "$DFL_INT" ros2 bag record -o "$RUN_DIR/bag" "${BAG_TOPICS[@]}" > "$RUN_DIR/bag.log" 2>&1 &
 BAG_PID=$!
-sleep 2
-if ! kill -0 $BAG_PID 2>/dev/null; then          # no zstd plugin: record uncompressed
-    rm -rf "$RUN_DIR/bag"
-    python3 -c "$DFL_INT" ros2 bag record -o "$RUN_DIR/bag" "${BAG_TOPICS[@]}" >> "$RUN_DIR/bag.log" 2>&1 &
-    BAG_PID=$!
-fi
 
 echo "Recording this run to $RUN_DIR"
 echo "  stop with ONE Ctrl-C and wait for 'run saved'"
 # Ctrl-C reaches every process of this terminal: the nodes shut down, the bag closes; this script
 # and the console logger carry on until the launch has ended, then pack the record.
-trap 'echo; echo "[run_slam] stopping: waiting for the nodes to shut down, then saving the run ..."' INT
+trap 'echo >&2; echo "[run_slam] stopping: waiting for the nodes to shut down, then saving the run ..." >&2' INT
 STAMP_PY='
 import signal, sys, time
 signal.signal(signal.SIGINT, signal.SIG_IGN)      # keep logging the shutdown; ends when the launch closes the pipe
@@ -393,6 +397,8 @@ if [ "$EXPLORE" = "true" ]; then
 fi
 rm -f "$START_MARK"
 tar czf "$RUNS_DIR/$RUN_NAME.tgz" -C "$RUNS_DIR" "$RUN_NAME"
-echo
-echo "[run_slam] run saved: $RUN_DIR"
-echo "           packed:    $RUNS_DIR/$RUN_NAME.tgz ($(du -h "$RUNS_DIR/$RUN_NAME.tgz" | cut -f1))"
+{
+    echo
+    echo "[run_slam] run saved: $RUN_DIR"
+    echo "           packed:    $RUNS_DIR/$RUN_NAME.tgz ($(du -h "$RUNS_DIR/$RUN_NAME.tgz" | cut -f1))"
+} >&2

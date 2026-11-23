@@ -7,14 +7,23 @@
   quickly). Re-running Hybrid-A* every second from a slightly different pose
   picked a different manoeuvre each time.
 
-  Recoveries back up, then wait. They never clear the costmaps: with a 1 m
-  sensor and unknown = free, clearing made the robot forget an obstacle it
-  could no longer see from up close and plan straight into it again
-  (simulation, 2026-10-10). No Spin: a car cannot turn on the spot.
+  Recoveries depend on what failed:
+  - Following the path failed (blocked, no progress): back up 0.25 m once and
+    follow again; if that fails too, wait 2 s and start over (at most 3 times).
+  - Planning failed (no path to the goal, or the car stands in an obstacle's
+    margin): wait 2 s and plan again, at most 3 times, then give up, so the
+    explorer picks another goal and its own stuck layer (ma_explore unstick:
+    drives out on the car's grid) can act. Backing up does not help an unreachable goal: in the lab (23 Nov) each
+    planning failure backed the car up 0.25 m until its rear met a wall, and it
+    was then stuck with free space ahead.
+  They never clear the costmaps: with a 1 m sensor and unknown = free,
+  clearing made the robot forget an obstacle it could no longer see from up
+  close and plan straight into it again (simulation, 2026-10-10). No Spin: a
+  car cannot turn on the spot.
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+    <RecoveryNode number_of_retries="3" name="NavigateRecovery">
       <PipelineSequence name="NavigateWithReplanning">
         <RateController hz="5.0">
           <Fallback>
@@ -27,14 +36,17 @@
             <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
           </Fallback>
         </RateController>
-        <FollowPath path="{path}" controller_id="FollowPath"/>
+        <RecoveryNode number_of_retries="1" name="FollowPathRecovery">
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <ReactiveFallback name="FollowPathRecoveryFallback">
+            <GoalUpdated/>
+            <BackUp backup_dist="0.25" backup_speed="0.08"/>
+          </ReactiveFallback>
+        </RecoveryNode>
       </PipelineSequence>
       <ReactiveFallback name="RecoveryFallback">
         <GoalUpdated/>
-        <RoundRobin name="RecoveryActions">
-          <BackUp backup_dist="0.25" backup_speed="0.08"/>
-          <Wait wait_duration="2"/>
-        </RoundRobin>
+        <Wait wait_duration="2"/>
       </ReactiveFallback>
     </RecoveryNode>
   </BehaviorTree>

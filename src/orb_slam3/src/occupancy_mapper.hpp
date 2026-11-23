@@ -164,6 +164,9 @@ struct GridParams {
     double bridgeMinTime     = 1.0;    // ... once it has tracked this long without a break (s)
     std::string bridgeHeading = "imu"; // heading across the gap: "imu" or "wheels"
     int    anchorMinPoints   = 100;    // tracked points the anchor frame before a loss should have
+    // The launch started the base driver (jetracer): its heartbeat must come. Without
+    // this (simulation) a missing heartbeat is normal and only a seen one is checked.
+    bool   expectDriver      = false;
 
     static GridParams declare(rclcpp::Node* n)
     {
@@ -206,6 +209,7 @@ struct GridParams {
         p.bridgeMinTime    = n->declare_parameter("grid.bridge_min_time", p.bridgeMinTime);
         p.bridgeHeading    = n->declare_parameter("grid.bridge_heading", p.bridgeHeading);
         p.anchorMinPoints  = n->declare_parameter("grid.bridge_anchor_min_points", p.anchorMinPoints);
+        p.expectDriver     = n->declare_parameter("grid.expect_driver", p.expectDriver);
         if (p.bridgeHeading != "imu" && p.bridgeHeading != "wheels") {
             RCLCPP_WARN(n->get_logger(), "[grid] bridge_heading '%s' unknown; using imu", p.bridgeHeading.c_str());
             p.bridgeHeading = "imu";
@@ -239,8 +243,10 @@ public:
             for (const char* action : {"navigate_to_pose", "navigate_through_poses"})
                 cancel_.push_back(node_->create_client<action_msgs::srv::CancelGoal>(
                     agent + "/" + action + "/_action/cancel_goal"));
-            // The base driver's heartbeat (jetracer, 10 Hz). Checked only once it
-            // has been seen: in simulation, or with an older driver, there is none.
+            // The base driver's heartbeat (jetracer, 10 Hz). Checked once it has
+            // been seen, or from 5 s after the start when the launch started the
+            // driver (grid.expect_driver): in simulation there is none.
+            driverStart_ = std::chrono::steady_clock::now();
             driver_sub_ = node_->create_subscription<std_msgs::msg::Bool>(
                 agent + "/base_driver/ok", 10, [this](std_msgs::msg::Bool::ConstSharedPtr m) {
                     driverOk_ = m->data;
@@ -789,14 +795,20 @@ private:
             ? std::chrono::duration<double>(now - lastPoseWall_.load()).count()
             : 1e9;
         const bool poseStale = p_.poseSource == "slam" && age > 0.3;
-        const bool driverDead = driverSeen_.load() &&
-            (!driverOk_.load() || now - driverWall_.load() > std::chrono::milliseconds(500));
+        const bool driverNever = p_.expectDriver && !driverSeen_.load() &&
+            now - driverStart_ > std::chrono::seconds(5);
+        const bool driverDead = driverNever || (driverSeen_.load() &&
+            (!driverOk_.load() || now - driverWall_.load() > std::chrono::milliseconds(500)));
         if (poseStale || driverDead) {
             const bool lost = slamLost_.load();
             const bool cancel = driverDead || lost || age > 1.5;
             const bool moving = m.linear.x != 0.0 || m.angular.z != 0.0;
             if (!gateHolding_) {
-                if (driverDead)
+                if (driverNever)
+                    RCLCPP_ERROR(node_->get_logger(),
+                        "[nav] NO BASE DRIVER: no heartbeat from the jetracer driver since the start "
+                        "(it is not running): holding the car still and cancelling the Nav2 goal");
+                else if (driverDead)
                     RCLCPP_WARN(node_->get_logger(),
                         "[nav] base driver not responding (motor board unplugged, or the driver "
                         "died): holding the car still and cancelling the Nav2 goal");
@@ -1423,6 +1435,7 @@ private:
     std::atomic<bool> slamLost_{false};      // tracking failed or in a temporary map (until the next pose)
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr driver_sub_;
     std::atomic<bool> driverSeen_{false}, driverOk_{false};
+    std::chrono::steady_clock::time_point driverStart_{std::chrono::steady_clock::now()};
     std::atomic<std::chrono::steady_clock::time_point> driverWall_{std::chrono::steady_clock::time_point{}};
     std::atomic<ORB_SLAM3::Map*> firstMap_{nullptr};
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr wheel_sub_;

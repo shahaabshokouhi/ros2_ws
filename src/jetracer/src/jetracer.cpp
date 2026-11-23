@@ -49,14 +49,19 @@ public:
     publish_tf_ = this->declare_parameter("publish_odom_transform", true);
     agent_name_ = this->declare_parameter("agent_name", "agent_0");
 
-    // Open serial port
+    // Open serial port. If the board is missing, keep running: the reader
+    // thread retries every second, and the heartbeat says false meanwhile, so
+    // the safety gate and the planner hold the car and say why (lab, 23 Nov:
+    // a missing board used to end this process, and nothing reported it).
     std::string err;
-    if (!openPort(err)) {
-      RCLCPP_ERROR(this->get_logger(), "Failed to open %s: %s", port_name_.c_str(), err.c_str());
-      rclcpp::shutdown();
-      return;
+    if (openPort(err)) {
+      port_ok_ = true;
+      ever_open_ = true;
+    } else {
+      RCLCPP_ERROR(this->get_logger(), "NO MOTOR BOARD: cannot open %s (%s). Check its USB cable and its "
+                   "power; retrying every second, the car will not move until it is found",
+                   port_name_.c_str(), err.c_str());
     }
-    port_ok_ = true;
     last_rx_ = std::chrono::steady_clock::now();
 
     // Publishers & TF
@@ -130,13 +135,15 @@ private:
   // The port failed (cable pulled, board reset): close it and reopen it every
   // second until the device is back. Called by the reader thread only.
   void reconnect() {
-    RCLCPP_ERROR(get_logger(), "Motor board on %s lost: stopped; reopening it every second",
-                 port_name_.c_str());
+    if (ever_open_)
+      RCLCPP_ERROR(get_logger(), "Motor board on %s lost: stopped; reopening it every second",
+                   port_name_.c_str());
     {
       std::lock_guard<std::mutex> lk(serial_mx_);
       boost::system::error_code ec;
       serial_.close(ec);
     }
+    int tries = 0;
     while (running_ && rclcpp::ok()) {
       std::this_thread::sleep_for(1s);
       std::lock_guard<std::mutex> lk(serial_mx_);
@@ -145,9 +152,14 @@ private:
         x_ = y_ = yaw_ = 0.0;               // no old command after the gap
         last_rx_ = std::chrono::steady_clock::now();
         port_ok_ = true;
-        RCLCPP_WARN(get_logger(), "Motor board on %s is back", port_name_.c_str());
+        if (ever_open_) RCLCPP_WARN(get_logger(), "Motor board on %s is back", port_name_.c_str());
+        else RCLCPP_WARN(get_logger(), "Motor board on %s found", port_name_.c_str());
+        ever_open_ = true;
         return;
       }
+      if (++tries % 10 == 0)
+        RCLCPP_ERROR(get_logger(), "still no motor board on %s after %d s (%s)",
+                     port_name_.c_str(), tries, err.c_str());
     }
   }
 
@@ -344,6 +356,7 @@ private:
   double x_{0}, y_{0}, yaw_{0};            // guarded by serial_mx_ (written by cmdVelCallback too)
   std::mutex serial_mx_;                    // writes, close and reopen (the reader thread reads without it)
   std::atomic<bool> port_ok_{false};
+  std::atomic<bool> ever_open_{false};    // the board was open once (lost vs never found)
   std::atomic<bool> running_{true};
   std::atomic<std::chrono::steady_clock::time_point> last_rx_{std::chrono::steady_clock::time_point{}};
   rclcpp::Time last_cmd_time_;

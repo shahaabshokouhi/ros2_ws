@@ -301,6 +301,7 @@ def launch_nodes(context):
             {'grid.map_half_size': 10.0 if nav else 0.0},   # nav: a 20 x 20 m map from the start
             {'grid.pose_source': nav_pose},
             {'grid.bridge': nav_bridge},
+            {'grid.expect_driver': bool((teleop or nav) and teleop_driver)},   # its heartbeat must come
             {'grid.max_range': grid_range},
             {'publish_gray': teleop},
             {'frame_prefix': frame_prefix},
@@ -354,6 +355,7 @@ def launch_nodes(context):
                               'policy': LaunchConfiguration('explore_policy').perform(context),
                               'device': LaunchConfiguration('explore_device').perform(context),
                               'mission_s': LaunchConfiguration('explore_mission_s').perform(context),
+                              'expect_driver': str(bool((teleop or nav) and teleop_driver)).lower(),
                               'frames': 'prefixed' if frame_prefix else 'plain'}.items()))
 
     return nodes
